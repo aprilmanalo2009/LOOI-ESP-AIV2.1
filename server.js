@@ -220,10 +220,10 @@ function getActiveKey() {
   return null;
 }
 
-function markKeyExhausted(key) {
+function markKeyUnavailable(key, reason = 'unavailable') {
   _keyExhausted.set(key, Date.now() + 24 * 60 * 60 * 1000);
   const available = API_KEYS.filter(k => (_keyExhausted.get(k) || 0) <= Date.now()).length;
-  console.log(`[KeyPool] key …${key.slice(-6)} quota exceeded → ${available}/${API_KEYS.length} key(s) still available`);
+  console.log(`[KeyPool] key …${key.slice(-6)} marked ${reason} → ${available}/${API_KEYS.length} key(s) still available`);
 }
 
 function keyPoolStatus() {
@@ -362,7 +362,7 @@ const ROBOT_TOOLS = [{
 const GEMINI_LIVE_SYSTEM = `You are LOOI, an interactive AI Robot Companion created by April Manalo. Keep spoken responses short (1-3 sentences) and speak naturally in Tagalog/Taglish. Call run_scenario immediately for any motor gesture or emotion response.`;
 
 function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
-  const apiKey = getActiveKey();
+  let apiKey = getActiveKey();
   const cid = Date.now().toString(36);
   const clientIp = request.socket.remoteAddress || 'unknown';
 
@@ -570,6 +570,24 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       console.log(`[GeminiLive:${cid}] Gemini disconnected: ${code} ${reason || ''}`);
       if (clientClosing || clientWs.readyState !== WebSocket.OPEN) return;
 
+      const closeReason = String(reason || '');
+      const authFailed = code === 1008 && /invalid authentication|authentication credentials|unauthorized|api key/i.test(closeReason);
+      if (authFailed && apiKey) {
+        // Do not retry a permanently rejected key every second. Move to the
+        // next configured key so one stale secret cannot create a reconnect
+        // storm for every connected ESP32.
+        markKeyUnavailable(apiKey, 'authentication failure');
+        apiKey = getActiveKey();
+        if (!apiKey) {
+          sendClientJson({ error: 'No valid Gemini API key is available. Update GEMINI_API_KEY secrets.' });
+          setTimeout(() => {
+            if (!clientClosing && clientWs.readyState === WebSocket.OPEN) clientWs.close(1011, 'Gemini authentication failed');
+          }, 5000);
+          return;
+        }
+        console.log(`[GeminiLive:${cid}] Switching to next configured Gemini key`);
+      }
+
       // Keep the device/browser socket alive while Gemini has a transient
       // upstream failure. This prevents ESP32 reconnect storms on mobile
       // hotspots and lets queued input continue after the next handshake.
@@ -590,6 +608,13 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
 
   const connectGemini = () => {
     if (clientClosing || clientWs.readyState !== WebSocket.OPEN) return;
+    if (!apiKey) {
+      apiKey = getActiveKey();
+      if (!apiKey) {
+        sendClientJson({ error: 'No Gemini API key is available.' });
+        return;
+      }
+    }
     gemWs = new WebSocket(`${GEMINI_LIVE_URL}?key=${apiKey}`);
     bindGeminiSocket(gemWs);
   };

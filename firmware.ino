@@ -9,7 +9,7 @@
 #include <math.h>
 
 // ── Server ──────────────────────────────────────────────────────────
-const char* WS_HOST = "f0fd1c53-240c-4836-a0a2-4bf6391eb499-00-1zxt1e2huj9to.sisko.replit.dev";
+const char* WS_HOST = "84e5f6f5-8b76-47a1-9e8f-3b6d66fb59b5-00-chnz7sm2kfqn.pike.replit.dev";
 const int   WS_PORT = 443;
 const char* WS_PATH = "/ws/esp32";
 

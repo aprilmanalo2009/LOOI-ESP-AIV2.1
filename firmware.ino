@@ -54,9 +54,9 @@ volatile float audioLevel = 0.0f;
 #define MIC_RATE     16000
 #define AUDIO_RATE   24000
 #define MIC_CHUNK_SAMPLES 512
-#define MAX_CHUNK_SIZE 16384
+#define MAX_CHUNK_SIZE 8192
 #define AUDIO_QUEUE_BLOCK_BYTES 2048
-#define AUDIO_QUEUE_BLOCK_COUNT 64
+#define AUDIO_QUEUE_BLOCK_COUNT 32
 uint8_t tempBuffer[MAX_CHUNK_SIZE];
 uint8_t b64DecodeBuf[MAX_CHUNK_SIZE];
 

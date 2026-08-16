@@ -49,6 +49,11 @@ the current Replit preview host before flashing.
 The ESP32 does not receive firmware changes automatically, so re-flash the
 sketch after changing `WS_HOST`, the firmware playback queue, or the server
 audio bridge.
+The playback queue is intentionally capped at 32 blocks and PCM scratch
+buffers at 8 KB so the ESP32-S3 retains enough heap for the TLS WebSocket
+handshake. If the serial log shows less than about 80 KB at `Free heap before
+WS`, reduce optional peripherals or audio buffers before debugging the phone
+hotspot.
 The firmware VAD uses a short four-frame silence endpoint (~128 ms) so the
 reply starts closer to the browser tester's immediate Stop & Send behavior.
 The current firmware also plays a one-second 440 Hz PCM5102 diagnostic tone at

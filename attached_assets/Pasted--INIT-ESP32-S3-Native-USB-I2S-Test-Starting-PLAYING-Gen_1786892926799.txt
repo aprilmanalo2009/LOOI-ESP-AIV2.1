@@ -1,0 +1,146 @@
+
+[INIT] ESP32-S3 Native USB I2S Test Starting...
+[PLAYING] Generating continuous 440Hz tone on Pins (BCK:15, WS:16, DOUT:17)...
+
+[INIT] ESP32-S3 Native USB I2S Test Starting...
+[PLAYING] Generating continuous 440Hz tone on Pins (BCK:15, WS:16, DOUT:17)...
+
+[INIT] ESP32-S3 Native USB I2S Test Starting...
+[PLAYING] Generating continuous 440Hz tone on Pins (BCK:15, WS:16, DOUT:17)...
+
+[INIT] ESP32-S3 I2S Test - GPIO 12, 13, 14...
+[PLAYING] Playing 440Hz Tone...
+
+[INIT] ESP32-S3 I2S Test - GPIO 12 (BCK), 13 (WS), 1 (DOUT)...
+[PLAYING] Playing 440Hz Tone...
+
+[INIT] ESP32-S3 Universal I2S Test Starting...
+[PLAYING] Playing 440Hz Tone on Pins (BCK:8, WS:9, DOUT:10)...
+
+[INIT] Direct GPIO Square Wave Sound Test Starting...
+
+[INIT] Direct GPIO Square Wave Sound Test Starting...
+ OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: FAILED for  11468 ms
+*wm:StartAP with SSID:  Alexatron
+*wm:AP IP address: 192.168.4.1
+*wm:Starting Web Portal 
+*wm:1 networks found
+*wm:Connecting to NEW AP: Infinix SMART 10 Plus
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:Connect to new AP [SUCCESS] 
+*wm:Got IP Address: 
+*wm:10.56.96.207 
+*wm:config portal exiting 
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving ff207455-ad3a-4d18-9332-13002c083402-00-5zvalhtzkiyh.sisko.replit.dev...
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✓ (Server reachable)
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Direct GPIO audio OK (GPIO 10, PWM 78125Hz / 8bit, PCM 24000Hz)
+[INIT] Free heap before WS: 224284
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[WS] Connected ✓
+[WS] TXT: {"serverHello":{"status":"connecting","target":"esp32"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ok"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ready","target":"esp32","model":"models/gemini-3.1-flash-live-preview"},"setupComplete":true}
+[WS] Server hello/keepalive ack
+nnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✓ (Server reachable)
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Direct GPIO audio OK (GPIO 10, PWM 78125Hz / 8bit, PCM 24000Hz)
+[INIT] Free heap before WS: 229600
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+ OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving ff207455-ad3a-4d18-9332-13002c083402-00-5zvalhtzkiyh.sisko.replit.dev...
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✓ (Server reachable)
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Direct GPIO audio OK (GPIO 10, PWM 78125Hz / 8bit, PCM 24000Hz)
+[INIT] Free heap before WS: 229584
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[WS] Connected ✓
+[WS] TXT: {"serverHello":{"status":"connecting","target":"esp32"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ok"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ready","target":"esp32","model":"models/gemini-3.1-flash-live-preview"},"setupComplete":true}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=976 threshold=260
+[MIC] END_STREAM rms=20 silence_frames=12 frames=31 bytes=22528 duration=1388ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=941 threshold=260
+[MIC] END_STREAM rms=13 silence_frames=12 frames=31 bytes=24576 duration=8034ms
+[WS] AI audio frame #1 (4096 bytes, RMS=6550)
+[WS] AI audio frame #2 (254 bytes, RMS=9156)
+[WS] AI audio frame #3 (4096 bytes, RMS=7925)
+[NET] Keepalive sent
+[WS] AI audio frame #10 (4096 bytes, RMS=387)
+[WS] AI audio frame #20 (4096 bytes, RMS=7896)
+[WS] AI audio frame #30 (3584 bytes, RMS=9307)
+[WS] AI audio frame #40 (4096 bytes, RMS=3726)
+[WS] AI audio frame #50 (4096 bytes, RMS=8860)
+[WS] AI audio frame #60 (4096 bytes, RMS=6881)
+[WS] AI audio frame #70 (4096 bytes, RMS=2752)
+[WS] TXT: {"robotAction":true,"move":"NONE","led":"NONE","speed":128}
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"turnComplete":true}
+[AUDIO] PLAYBACK_END (Gemini turn complete)
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack

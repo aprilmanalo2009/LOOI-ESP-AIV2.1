@@ -1,0 +1,328 @@
+[WS] Disconnected (failure #1, library retry interval active)
+[WS] Connected ✓
+[WS] TXT: {"serverHello":{"status":"connecting","target":"esp32"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ok"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ready","target":"esp32","model":"models/gemini-3.1-flash-live-preview"},"setupComplete":true}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=282 threshold=260
+[MIC] END_STREAM rms=9 silence_frames=12 frames=13 bytes=7680 duration=602ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=1685 threshold=260
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] END_STREAM rms=41 silence_frames=12 frames=173 bytes=114688 duration=4575ms
+[MIC] START_STREAM rms=710 threshold=260
+[MIC] END_STREAM rms=13 silence_frames=12 frames=94 bytes=78336 duration=4585ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[WS] Disconnected (failure #1, library retry interval active)
+[WS] Disconnected (failure #2, library retry interval active)
+[WS] Disconnected (failure #3, library retry interval active)
+[WS] Disconnected (failure #4, library retry interval active)
+[WS] Disconnected (failure #5, library retry interval active)
+[WS] Disconnected (failure #6, library retry interval active)
+[WS] Disconnected (failure #7, library retry interval active)
+[WS] Disconnected (failure #8, library retry interval active)
+[WS] Disconnected (failure #9, library retry interval active)
+[WS] Disconnected (failure #10, library retry interval active)
+[WS] Disconnected (failure #11, library retry interval active)
+[WS] Disconnected (failure #12, library retry interval active)
+[WS] Disconnected (failure #13, library retry interval active)
+[WS] Disconnected (failure #14, library retry interval active)
+[WS] Disconnected (failure #15, library retry interval active)
+[WS] Disconnected (failure #16, library retry interval active)
+[WS] Disconnected (failure #17, library retry interval active)
+[WS] Disconnected (failure #18, library retry interval active)
+[WS] Disconnected (failure #19, library retry interval active)
+[WS] Disconnected (failure #20, library retry interval active)
+[WS] Disconnected (failure #21, library retry interval active)
+[WS] Disconnected (failure #22, library retry interval active)
+[WS] Disconnected (failure #23, library retry interval active)
+[WS] Disconnected (failure #24, library retry interval active)
+[WS] Disconnected (failure #25, library retry interval active)
+[WS] Disconnected (failure #26, library retry interval active)
+[WS] Disconnected (failure #27, library retry interval active)
+[WS] Disconnected (failure #28, library retry interval active)
+[WS] Disconnected (failure #29, library retry interval active)
+[WS] Disconnected (failure #30, library retry interval active)
+[NET] Too many failures, restarting ESP32...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4037aa46
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x10cc
+load:0x403c8700,len:0xc2c
+load:0x403cb700,len:0x30c0
+entry 0x403c88b8
+
+
+═══════════════════════════════════════
+  ALEXATRON BOOT
+═══════════════════════════════════════
+[BOOT] Reset reason: Software restart
+[INIT] NeoPixel OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: Infinix SMART 10 Plus
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving ff207455-ad3a-4d18-9332-13002c083402-00-5zvalhtzkiyh.sisko.replit.dev...
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✗ (code: 404)
+[NET] WARNING: Server HTTPS not reachable!
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Installing PCM5100 DAC I2S...
+[INIT] PCM5100 DAC I2S OK (BCK GPIO 4, WS GPIO 5, DIN GPIO 6, 24kHz)
+[INIT] Free heap before WS: 192860
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[WS] Disconnected (failure #1, library retry interval active)
+[WS] Disconnected (failure #2, library retry interval active)
+[WS] Disconnected (failure #3, library retry interval active)
+[WS] Disconnected (failure #4, library retry interval active)
+[WS] Disconnected (failure #5, library retry interval active)
+[WS] Disconnected (failure #6, library retry interval active)
+[WS] Disconnected (failure #7, library retry interval active)
+[WS] Disconnected (failure #8, library retry interval active)
+[WS] Disconnected (failure #9, library retry interval active)
+[WS] Disconnected (failure #10, library retry interval active)
+[WS] Disconnected (failure #11, library retry interval active)
+[WS] Disconnected (failure #12, library retry interval active)
+[WS] Disconnected (failure #13, library retry interval active)
+[WS] Disconnected (failure #14, library retry interval active)
+[WS] Disconnected (failure #15, library retry interval active)
+[WS] Disconnected (failure #16, library retry interval active)
+[WS] Disconnected (failure #17, library retry interval active)
+[WS] Disconnected (failure #18, library retry interval active)
+[WS] Disconnected (failure #19, library retry interval active)
+[WS] Disconnected (failure #20, library retry interval active)
+[WS] Disconnected (failure #21, library retry interval active)
+[WS] Disconnected (failure #22, library retry interval active)
+[WS] Disconnected (failure #23, library retry interval active)
+[WS] Disconnected (failure #24, library retry interval active)
+[WS] Disconnected (failure #25, library retry interval active)
+[WS] Disconnected (failure #26, library retry interval active)
+[WS] Disconnected (failure #27, library retry interval active)
+[WS] Disconnected (failure #28, library retry interval active)
+[WS] Disconnected (failure #29, library retry interval active)
+[WS] Disconnected (failure #30, library retry interval active)
+[NET] Too many failures, restarting ESP32...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x4037aa46
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x10cc
+load:0x403c8700,len:0xc2c
+load:0x403cb700,len:0x30c0
+entry 0x403c88b8
+
+
+═══════════════════════════════════════
+  ALEXATRON BOOT
+═══════════════════════════════════════
+[BOOT] Reset reason: Software restart
+[INIT] NeoPixel OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: Infinix SMART 10 Plus
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: FAILED for  11355 ms
+*wm:StartAP with SSID:  Alexatron
+*wm:AP IP address: 192.168.4.1
+*wm:Starting Web Portal 
+*wm:config portal has timed out 
+*wm:config portal exiting 
+[INIT] WiFi failed, restarting...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x42033f7a
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x10cc
+load:0x403c8700,len:0xc2c
+load:0x403cb700,len:0x30c0
+entry 0x403c88b8
+
+
+═══════════════════════════════════════
+  ALEXATRON BOOT
+═══════════════════════════════════════
+[BOOT] Reset reason: Software restart
+[INIT] NeoPixel OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: Infinix SMART 10 Plus
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving ff207455-ad3a-4d18-9332-13002c083402-00-5zvalhtzkiyh.sisko.replit.dev...
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✗ (code: 404)
+[NET] WARNING: Server HTTPS not reachable!
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Installing PCM5100 DAC I2S...
+[INIT] PCM5100 DAC I2S OK (BCK GPIO 4, WS GPIO 5, DIN GPIO 6, 24kHz)
+[INIT] Free heap before WS: 192860
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[WS] Disconnected (failure #1, library retry interval active)
+[WS] Disconnected (failure #2, library retry interval active)
+[WS] Disconnected (failure #3, library retry interval active)
+[WS] Disconnected (failure #4, library retry interval active)
+[WS] Disconnected (failure #5, library retry interval active)
+[WS] Disconnected (failure #6, library retry interval active)
+[WS] Disconnected (failure #7, library retry interval active)
+[WS] Disconnected (failure #8, library retry interval active)
+[WS] Disconnected (failure #9, library retry interval active)
+[WS] Disconnected (failure #10, library retry interval active)
+[WS] Disconnected (failure #11, library retry interval active)
+[WS] Disconnected (failure #12, library retry interval active)
+[WS] Disconnected (failure #13, library retry interval active)
+[WS] Disconnected (failure #14, library retry interval active)
+ OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving f0fd1c53-240c-4836-a0a2-4bf6391eb499-00-1zxt1e2huj9to.sisko.replit.dev...
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✓ (Server reachable)
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Direct GPIO audio OK (GPIO 10, PWM 78125Hz / 8bit, PCM 24000Hz)
+[AUDIO TEST] GPIO 10: 440Hz tone for 1 second
+[AUDIO TEST] Tone ended
+[INIT] Free heap before WS: 229648
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[WS] Connected ✓
+[WS] TXT: {"serverHello":{"status":"connecting","target":"esp32"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ok"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ready","target":"esp32","model":"models/gemini-3.1-flash-live-preview"},"setupComplete":true}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=1751 threshold=260
+[MIC] END_STREAM rms=13 silence_frames=12 frames=27 bytes=21504 duration=1537ms
+[MIC] START_STREAM rms=2953 threshold=260
+[MIC] END_STREAM rms=88 silence_frames=12 frames=77 bytes=39424 duration=1217ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=5079 threshold=260
+[MIC] END_STREAM rms=113 silence_frames=12 frames=37 bytes=18944 duration=577ms
+[MIC] START_STREAM rms=331 threshold=260
+[MIC] END_STREAM rms=93 silence_frames=12 frames=51 bytes=26112 duration=801ms
+[WS] AI audio frame #1 (2048 bytes, RMS=540)
+[WS] AI audio frame #2 (1342 bytes, RMS=36)
+[WS] AI audio frame #3 (2048 bytes, RMS=5635)
+[WS] AI audio frame #10 (1536 bytes, RMS=102)
+[WS] AI audio frame #20 (2048 bytes, RMS=706)
+[WS] AI audio frame #30 (2048 bytes, RMS=2942)
+[WS] AI audio frame #40 (2048 bytes, RMS=5692)
+[NET] Keepalive sent
+[WS] AI audio frame #50 (2048 bytes, RMS=878)
+[WS] AI audio frame #60 (2048 bytes, RMS=79)
+[WS] AI audio frame #70 (2048 bytes, RMS=7315)
+[WS] AI audio frame #80 (1024 bytes, RMS=6239)
+[WS] AI audio frame #90 (2048 bytes, RMS=3320)
+[WS] AI audio frame #100 (2048 bytes, RMS=10315)
+[WS] AI audio frame #110 (2048 bytes, RMS=7995)
+[WS] AI audio frame #120 (2048 bytes, RMS=7792)
+[WS] AI audio frame #130 (2048 bytes, RMS=8034)
+[WS] AI audio frame #140 (896 bytes, RMS=5)
+[WS] TXT: {"turnComplete":true}
+[AUDIO] PLAYBACK_END (Gemini turn complete)
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=507 threshold=260
+[MIC] END_STREAM rms=41 silence_frames=12 frames=18 bytes=11264 duration=1300ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=1332 threshold=260
+[MIC] END_STREAM rms=12 silence_frames=12 frames=35 bytes=26112 duration=1519ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=904 threshold=260
+[MIC] END_STREAM rms=81 silence_frames=12 frames=16 bytes=10752 duration=1099ms
+[WS] TXT: {"robotAction":true,"move":"NONE","led":"LED_YELLOW","speed":128}
+[WS] AI audio frame #150 (2048 bytes, RMS=10726)
+[WS] AI audio frame #160 (2048 bytes, RMS=11863)
+[WS] AI audio frame #170 (2048 bytes, RMS=461)
+[WS] AI audio frame #180 (2048 bytes, RMS=4465)
+[WS] AI audio frame #190 (2048 bytes, RMS=6904)
+[WS] AI audio frame #200 (2048 bytes, RMS=6713)
+[NET] Keepalive sent
+[WS] AI audio frame #210 (2048 bytes, RMS=2005)
+[WS] AI audio frame #220 (2048 bytes, RMS=42)
+[WS] AI audio frame #230 (2048 bytes, RMS=2725)
+[WS] AI audio frame #240 (2048 bytes, RMS=8316)
+[WS] AI audio frame #250 (2048 bytes, RMS=5)
+[WS] TXT: {"turnComplete":true}
+[AUDIO] PLAYBACK_END (Gemini turn complete)
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack

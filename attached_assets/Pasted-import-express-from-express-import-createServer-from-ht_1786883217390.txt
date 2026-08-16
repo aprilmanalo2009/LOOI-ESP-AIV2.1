@@ -1,0 +1,138 @@
+import express from 'express';
+import { createServer } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+const httpServer = createServer(app);
+
+app.use(express.json());
+app.use(express.static('public'));
+
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// --- I-PASTE DITO ANG IYONG TUNAY NA GEMINI API KEY KUNG AYAW MO GAMITIN ANG TERMINAL ENV ---
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AQ.Ab8RN6JxY6FKfo5hkfO6VRyTAMG-Gm6SlJu8MJRjX3fv8g-qNA";
+const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+
+const geminiLiveWss = new WebSocketServer({ noServer: true });
+
+function attachGeminiLive(clientWs) {
+  if (!GEMINI_API_KEY || GEMINI_API_KEY.includes("ILAGAY_DITO")) {
+    console.error("❌ [Error] Walang nakikitang valid na GEMINI_API_KEY. Pakisulat ng tama sa server.js.");
+    clientWs.send(JSON.stringify({ error: "API Key missing on server." }));
+    clientWs.close(1011, "Missing API Key");
+    return;
+  }
+
+  console.log("🔌 [Server] Kumokonekta sa Google Gemini Live API...");
+  const gemWs = new WebSocket(`${GEMINI_LIVE_URL}?key=${GEMINI_API_KEY}`);
+  let isReady = false;
+  const audioQueue = [];
+
+  gemWs.on('open', () => {
+    console.log("✅ [Server] Konektado na sa Google Gemini Server!");
+    
+    // INAYOS NA JSON PAYLOAD: Alinsunod sa opisyal na Gemini Live Websocket Specs
+    const setupMessage = {
+      setup: {
+        model: 'models/gemini-3.1-flash-live-preview',
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { 
+              prebuiltVoiceConfig: { voiceName: 'Kore' } 
+            }
+          }
+        },
+        systemInstruction: { 
+          parts: [{ 
+            text: "You are M3GAN, the cybernetic companion doll. Speak in a calm, highly precise Taglish. Let your subtle creepy, sassy, and dark protective nature bleed through your words organically." 
+          }] 
+        }
+      }
+    };
+
+    gemWs.send(JSON.stringify(setupMessage));
+    console.log("⚙️ [Server] Configuration payload successfully transmitted to Gemini.");
+  });
+
+  gemWs.on('message', (data) => {
+    const str = data.toString();
+    let msg;
+    try { msg = JSON.parse(str); } catch { return; }
+
+    // Tingnan kung may error message na ibinabalik ang Google AI Studio
+    if (msg.error) {
+      console.error("❌ [Gemini Error Remote]:", JSON.stringify(msg.error));
+    }
+
+    if (msg.setupComplete !== undefined) {
+      isReady = true;
+      console.log("🚀 [Server] Gemini engine is ready. Draining cached buffers...");
+      for (const chunk of audioQueue) {
+        if (gemWs.readyState === WebSocket.OPEN) gemWs.send(chunk);
+      }
+      audioQueue.length = 0;
+    }
+
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(str);
+    }
+  });
+
+  clientWs.on('message', (data, isBinary) => {
+    if (!isBinary) {
+      if (isReady && gemWs.readyState === WebSocket.OPEN) gemWs.send(data.toString());
+      return;
+    }
+    
+    const pcmBase64 = Buffer.from(data).toString('base64');
+    const msg = JSON.stringify({
+      realtimeInput: { audio: { data: pcmBase64, mimeType: 'audio/pcm;rate=16000' } }
+    });
+
+    if (isReady && gemWs.readyState === WebSocket.OPEN) {
+      gemWs.send(msg);
+    } else {
+      audioQueue.push(msg);
+      if (audioQueue.length > 50) audioQueue.shift();
+    }
+  });
+
+  clientWs.on('close', (code, reason) => {
+    console.log(`🔌 [Server] Client Browser left. Code: ${code}, Reason: ${reason}`);
+    if (gemWs.readyState < 2) gemWs.close();
+  });
+
+  gemWs.on('close', (code, reason) => {
+    console.log(`⚠️ [Server] Gemini remote host closed connection. Code: ${code}, Reason: ${reason}`);
+    if (clientWs.readyState < 2) clientWs.close(1011, "Gemini disconnected");
+  });
+
+  gemWs.on('error', (err) => {
+    console.error("❌ [Server Connection Error]:", err.message);
+  });
+}
+
+geminiLiveWss.on('connection', (ws) => attachGeminiLive(ws));
+
+httpServer.on('upgrade', (request, socket, head) => {
+  const { pathname } = new URL(request.url, 'http://localhost');
+  if (pathname === '/ws/gemini') {
+    geminiLiveWss.handleUpgrade(request, socket, head, (ws) => {
+      geminiLiveWss.emit('connection', ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+const PORT = process.env.PORT || 5000;
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 M3GAN Test Server active on http://localhost:${PORT}`);
+});

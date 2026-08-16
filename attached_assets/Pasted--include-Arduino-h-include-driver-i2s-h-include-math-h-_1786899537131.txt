@@ -1,0 +1,73 @@
+#include <Arduino.h>
+#include "driver/i2s.h"
+#include <math.h>
+
+// I2S Hardware Configuration Pins
+#define I2S_NUM         I2S_NUM_0
+#define I2S_BCK_IO      4
+#define I2S_WS_IO       5
+#define I2S_DO_IO       6
+
+// Audio Parameters
+#define SAMPLE_RATE     44100
+#define WAVE_FREQ       440     // Frequency in Hz (440 Hz = Concert Pitch A4)
+#define TABLE_SIZE      256
+
+// Pre-calculated Lookup Table for Pure Sine Wave
+int16_t sineTable[TABLE_SIZE];
+
+void setup() {
+  Serial.begin(115200);
+
+  // 1. i-generate ang 16-bit Sine Wave Lookup Table
+  for (int i = 0; i < TABLE_SIZE; i++) {
+    sineTable[i] = (int16_t)(sin(2 * M_PI * i / TABLE_SIZE) * 20000); // Amplitude ~20000
+  }
+
+  // 2. I2S Configuration
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false,
+    .tx_desc_auto_clear = true
+  };
+
+  // 3. I2S Pin Mapping Configuration
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCK_IO,
+    .ws_io_num = I2S_WS_IO,
+    .data_out_num = I2S_DO_IO,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+
+  // 4. i-install at simulan ang I2S Driver
+  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM, &pin_config);
+
+  Serial.println("I2S Sine Wave Generator Started!");
+}
+
+void loop() {
+  static float index = 0;
+  float step = (float)(WAVE_FREQ * TABLE_SIZE) / SAMPLE_RATE;
+
+  // Kumuha ng audio sample base sa sine table index
+  int16_t sample = sineTable[(int)index];
+  index += step;
+  if (index >= TABLE_SIZE) {
+    index -= TABLE_SIZE;
+  }
+
+  // Dual-channel (Stereo) sample buffer
+  int16_t buffer[2] = { sample, sample };
+
+  // Ipadala ang audio data sa PCM5102 gamit ang I2S DMA
+  size_t bytes_written;
+  i2s_write(I2S_NUM, buffer, sizeof(buffer), &bytes_written, portMAX_DELAY);
+}

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
+  <title>Gemini Live Robot Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0c0d14; color: #f0f0f0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 24px; display: flex; flex-direction: column; align-items: center; }
+    .container { max-width: 800px; width: 100%; }
+    header { text-align: center; margin-bottom: 24px; }
+    h1 { color: #00bfff; font-size: 1.8rem; }
+    .status-card { background: #151622; border: 1px solid #282a3a; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+    .badge { padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; background: #2a2a3a; color: #aaa; }
+    .badge.online { background: #00e5a022; color: #00e5a0; border: 1px solid #00e5a055; }
+    .logs { background: #08090e; border: 1px solid #1a1c2a; border-radius: 8px; padding: 12px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #88ff88; }
+    .log-line { margin-bottom: 4px; word-break: break-all; }
+    .tester-card { background: #151622; border: 1px solid #282a3a; border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+    .tester-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; }
+    .tester-heading h2 { font-size: 1.05rem; color: #fff; }
+    .tester-state { color: #888; font-size: .82rem; }
+    .meter { height: 8px; background: #0a0b10; border-radius: 8px; overflow: hidden; margin: 14px 0 4px; }
+    .meter > div { height: 100%; width: 0; background: linear-gradient(90deg, #00bfff, #00e5a0); transition: width .08s linear; }
+    .meter-label { color: #777; font: .75rem monospace; }
+    .controls { display: flex; gap: 12px; margin-top: 16px; }
+    button { flex: 1; padding: 12px; background: #00bfff; color: #000; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+    button:hover { background: #0099cc; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.secondary { background: #273044; color: #dbefff; }
+    button.secondary:hover { background: #35435e; }
+    button.danger { background: #ff5c6c; color: #180206; }
+    button.danger:hover { background: #ff7886; }
+    @media (max-width: 560px) { body { padding: 14px; } .controls { flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🤖 Gemini Live Robot Control</h1>
+      <p style="color: #666;">Realtime Audio VAD & Soft Movement Bridge</p>
+    </header>
+
+    <div class="status-card">
+      <div>
+        <strong>ESP32 / Backend Status</strong>
+        <p style="font-size: 0.8rem; color: #888;" id="status-sub">Checking API Key Pool...</p>
+      </div>
+      <span class="badge" id="status-badge">DISCONNECTED</span>
+    </div>
+
+    <section class="tester-card">
+      <div class="tester-heading">
+        <h2>Browser Voice Tester</h2>
+        <span class="tester-state" id="tester-state">Idle — ready to test</span>
+      </div>
+      <p style="font-size:.82rem;color:#999;line-height:1.45;">
+        Speak into your browser microphone, then press Stop &amp; Send. Gemini's voice reply will play here.
+        This uses the same WebSocket bridge as the ESP32.
+      </p>
+      <div class="meter" aria-label="Microphone level"><div id="mic-level"></div></div>
+      <div class="meter-label" id="mic-level-label">Mic level: 0%</div>
+      <div class="controls">
+        <button id="start-test" onclick="startVoiceTest()">Start microphone</button>
+        <button id="stop-test" class="danger" onclick="stopVoiceTest()" disabled>Stop &amp; Send</button>
+      </div>
+    </section>
+
+    <div class="logs" id="log-box">
+      <div class="log-line">[System] Dashboard initialized. Ready for connections.</div>
+    </div>
+
+    <div class="controls">
+      <button onclick="checkStatus()">Refresh Status</button>
+      <button onclick="clearLogs()" style="background: #333; color: #fff;">Clear Console</button>
+    </div>
+  </div>
+
+  <script>
+    const logBox = document.getElementById('log-box');
+    const badge = document.getElementById('status-badge');
+    const statusSub = document.getElementById('status-sub');
+    const startButton = document.getElementById('start-test');
+    const stopButton = document.getElementById('stop-test');
+    const testerState = document.getElementById('tester-state');
+    const micLevel = document.getElementById('mic-level');
+    const micLevelLabel = document.getElementById('mic-level-label');
+
+    let testerSocket = null;
+    let mediaStream = null;
+    let audioContext = null;
+    let micSource = null;
+    let micProcessor = null;
+    let micStreaming = false;
+    let awaitingResponse = false;
+    let nextPlaybackTime = 0;
+    let playbackQueue = [];
+    let playbackBufferedSeconds = 0;
+    let playbackStarted = false;
+    let playbackPumpTimer = null;
+    let responseTurnComplete = false;
+    let closeAfterPlaybackTimer = null;
+    const AUDIO_JITTER_BUFFER_SECONDS = 0.35;
+    const MAX_SOCKET_BUFFERED_BYTES = 256 * 1024;
+    let sentAudioFrames = 0;
+    let sentAudioBytes = 0;
+
+    function log(msg) {
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logBox.appendChild(line);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function clearLogs() {
+      logBox.innerHTML = '';
+      log('[System] Console cleared.');
+    }
+
+    function socketUrl(path) {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${location.host}${path}`;
+    }
+
+    function setTesterState(text) {
+      testerState.textContent = text;
+    }
+
+    function setMicLevel(value) {
+      const percent = Math.max(0, Math.min(100, Math.round(value)));
+      micLevel.style.width = `${percent}%`;
+      micLevelLabel.textContent = `Mic level: ${percent}%`;
+    }
+
+    function resampleToPcm(input, sourceRate, targetRate) {
+      const outputLength = Math.max(1, Math.round(input.length * targetRate / sourceRate));
+      const output = new ArrayBuffer(outputLength * 2);
+      const view = new DataView(output);
+      const ratio = sourceRate / targetRate;
+      for (let i = 0; i < outputLength; i++) {
+        const sourceIndex = Math.min(input.length - 1, Math.floor(i * ratio));
+        const sample = Math.max(-1, Math.min(1, input[sourceIndex]));
+        view.setInt16(i * 2, sample < 0 ? sample * 32768 : sample * 32767, true);
+      }
+      return output;
+    }
+
+    function decodePcm16(base64) {
+      const binary = atob(base64);
+      const samples = new Float32Array(Math.floor(binary.length / 2));
+      for (let i = 0; i < samples.length; i++) {
+        let value = binary.charCodeAt(i * 2) | (binary.charCodeAt(i * 2 + 1) << 8);
+        if (value & 0x8000) value -= 0x10000;
+        samples[i] = value / 32768;
+      }
+      return samples;
+    }
+
+    function finishPlaybackIfReady() {
+      if (!responseTurnComplete || playbackQueue.length || playbackBufferedSeconds > 0.001) return;
+      const remaining = Math.max(0, nextPlaybackTime - (audioContext?.currentTime || 0));
+      if (remaining > 0.04) {
+        clearTimeout(closeAfterPlaybackTimer);
+        closeAfterPlaybackTimer = setTimeout(finishPlaybackIfReady, Math.ceil(remaining * 1000) + 25);
+        return;
+      }
+      log('[AUDIO] Buffered reply fully played');
+      setTesterState('Reply complete — ready for another test');
+      awaitingResponse = false;
+      startButton.disabled = false;
+      closeTesterSocket();
+    }
+
+    function pumpPlayback() {
+      playbackPumpTimer = null;
+      if (!audioContext || !playbackQueue.length) {
+        finishPlaybackIfReady();
+        return;
+      }
+
+      const now = audioContext.currentTime;
+      if (!playbackStarted) {
+        // Delay the first sample slightly so a slow/mobile connection has
+        // room to absorb a burst of network jitter before playback begins.
+        nextPlaybackTime = now + AUDIO_JITTER_BUFFER_SECONDS;
+        playbackStarted = true;
+      } else if (nextPlaybackTime < now - 0.02) {
+        // We already underrun. Restart a little ahead of the hardware clock
+        // instead of scheduling into the past and making the next chunk click.
+        nextPlaybackTime = now + 0.02;
+      }
+
+      while (playbackQueue.length) {
+        const samples = playbackQueue.shift();
+        playbackBufferedSeconds = Math.max(0, playbackBufferedSeconds - samples.length / 24000);
+        const buffer = audioContext.createBuffer(1, samples.length, 24000);
+        buffer.getChannelData(0).set(samples);
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+        const startAt = Math.max(audioContext.currentTime + 0.01, nextPlaybackTime);
+        source.start(startAt);
+        nextPlaybackTime = startAt + buffer.duration;
+      }
+      finishPlaybackIfReady();
+    }
+
+    function queuePcm(base64) {
+      const samples = decodePcm16(base64);
+      if (!samples.length) return;
+      if (!audioContext || audioContext.state === 'closed') audioContext = new AudioContext();
+      if (audioContext.state === 'suspended') audioContext.resume();
+      playbackQueue.push(samples);
+      playbackBufferedSeconds += samples.length / 24000;
+      if (!playbackStarted && playbackBufferedSeconds < AUDIO_JITTER_BUFFER_SECONDS) {
+        if (!playbackPumpTimer) {
+          playbackPumpTimer = setTimeout(pumpPlayback, AUDIO_JITTER_BUFFER_SECONDS * 1000);
+        }
+        return;
+      }
+      if (!playbackPumpTimer) playbackPump();
+    }
+
+    function closeTesterSocket() {
+      clearTimeout(closeAfterPlaybackTimer);
+      closeAfterPlaybackTimer = null;
+      if (testerSocket) {
+        testerSocket.onclose = null;
+        testerSocket.close();
+        testerSocket = null;
+      }
+    }
+
+    function bindTesterSocket(socket) {
+      socket.onmessage = event => {
+        if (typeof event.data !== 'string') return;
+        let message;
+        try { message = JSON.parse(event.data); } catch { return; }
+        if (message.error) {
+          log(`[Gemini error] ${typeof message.error === 'string' ? message.error : JSON.stringify(message.error)}`);
+          setTesterState('Gemini returned an error');
+        } else if (message.serverHello) {
+          const status = message.serverHello.status;
+          if (status === 'ready') {
+            log('[WS] Gemini session ready');
+            setTesterState(micStreaming ? 'Listening — speak now' : 'Connected — ready to test');
+          } else {
+            log('[WS] Server connected — Gemini session is starting');
+          }
+        } else {
+          // Gemini Live nests audio under modelTurn.parts[].inlineData.
+          // The bridge forwards the original Gemini event to the browser, so
+          // inspect the nested parts rather than looking for a root inlineData.
+          const audioParts = message.serverContent?.modelTurn?.parts
+            ?.map(part => part.inlineData)
+            .filter(inlineData => inlineData?.data) || [];
+          if (audioParts.length) {
+            for (const audio of audioParts) queuePcm(audio.data);
+            setTesterState('Gemini is speaking');
+            const bytes = audioParts.reduce((total, audio) => total + Math.round(audio.data.length * 0.75), 0);
+            log(`[AUDIO] Gemini response audio buffered (${bytes} PCM bytes, ${(playbackBufferedSeconds * 1000).toFixed(0)}ms queued)`);
+          }
+          if (message.serverContent?.interrupted) {
+            playbackQueue = [];
+            playbackBufferedSeconds = 0;
+            playbackStarted = false;
+            nextPlaybackTime = 0;
+            responseTurnComplete = false;
+            log('[AUDIO] Gemini interrupted the current reply');
+            setTesterState('Reply interrupted');
+          }
+          if (message.serverContent?.turnComplete) {
+            log(`[AUDIO] PLAYBACK_END — Gemini turn complete (${sentAudioFrames} mic frames sent)`);
+            responseTurnComplete = true;
+            setTesterState('Reply received — finishing buffered audio…');
+            finishPlaybackIfReady();
+          }
+          if (message.robotAction) {
+            log(`[ROBOT] ${message.robotAction.move || 'NONE'} / ${message.robotAction.led || 'NONE'}`);
+          }
+        }
+      };
+      socket.onerror = () => {
+        log('[WS] Browser tester WebSocket error');
+        setTesterState('WebSocket error');
+      };
+      socket.onclose = () => {
+        if (micStreaming) {
+          micStreaming = false;
+          stopMicrophoneCapture();
+          startButton.disabled = false;
+          stopButton.disabled = true;
+          setTesterState('Connection closed');
+        }
+      };
+    }
+
+    function stopMicrophoneCapture() {
+      if (micProcessor) {
+        micProcessor.onaudioprocess = null;
+        micProcessor.disconnect();
+        micProcessor = null;
+      }
+      if (micSource) {
+        micSource.disconnect();
+        micSource = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream = null;
+      }
+      setMicLevel(0);
+    }
+
+    async function startVoiceTest() {
+      if (micStreaming || awaitingResponse) return;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        log('[MIC] Browser microphone API unavailable. Use the secure Replit preview URL.');
+        setTesterState('Microphone unavailable');
+        return;
+      }
+
+      startButton.disabled = true;
+      setTesterState('Requesting microphone permission…');
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        audioContext = new AudioContext();
+        await audioContext.resume();
+        testerSocket = new WebSocket(socketUrl('/ws/gemini'));
+        testerSocket.binaryType = 'arraybuffer';
+        bindTesterSocket(testerSocket);
+
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('WebSocket connection timed out')), 8000);
+          testerSocket.addEventListener('open', () => { clearTimeout(timeout); resolve(); }, { once: true });
+          testerSocket.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('WebSocket connection failed')); }, { once: true });
+        });
+
+        testerSocket.send(JSON.stringify({ event: 'start_stream' }));
+        micStreaming = true;
+        awaitingResponse = false;
+         nextPlaybackTime = 0;
+        playbackQueue = [];
+        playbackBufferedSeconds = 0;
+        playbackStarted = false;
+        responseTurnComplete = false;
+        clearTimeout(closeAfterPlaybackTimer);
+        clearTimeout(playbackPumpTimer);
+        playbackPumpTimer = null;
+        sentAudioFrames = 0;
+        sentAudioBytes = 0;
+        stopButton.disabled = false;
+        setTesterState('Listening — speak now');
+        log('[MIC] START_STREAM sent from browser');
+
+        micSource = audioContext.createMediaStreamSource(mediaStream);
+        micProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+        micProcessor.onaudioprocess = event => {
+          if (!micStreaming || !testerSocket || testerSocket.readyState !== WebSocket.OPEN) return;
+          const input = event.inputBuffer.getChannelData(0);
+          let sum = 0;
+          for (const sample of input) sum += sample * sample;
+          setMicLevel(Math.sqrt(sum / input.length) * 420);
+          const pcm = resampleToPcm(input, audioContext.sampleRate, 16000);
+           // Do not let a weak uplink build an unbounded WebSocket send
+           // buffer. Dropping one input frame is safer than delaying the
+           // entire live turn by many seconds.
+           if (testerSocket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) {
+             if (sentAudioFrames === 0 || sentAudioFrames % 20 === 0) {
+               log('[MIC] Network busy — skipping one input frame to stay realtime');
+             }
+             return;
+           }
+          testerSocket.send(pcm);
+          sentAudioFrames++;
+          sentAudioBytes += pcm.byteLength;
+        };
+        micSource.connect(micProcessor);
+        micProcessor.connect(audioContext.destination);
+      } catch (error) {
+        log(`[MIC] Start failed: ${error.message}`);
+        setTesterState('Could not start microphone');
+        stopMicrophoneCapture();
+        closeTesterSocket();
+        startButton.disabled = false;
+      }
+
+    }
+
+    function stopVoiceTest() {
+      if (!micStreaming || !testerSocket || testerSocket.readyState !== WebSocket.OPEN) return;
+      micStreaming = false;
+      awaitingResponse = true;
+      stopButton.disabled = true;
+      stopMicrophoneCapture();
+      testerSocket.send(JSON.stringify({ event: 'end_stream' }));
+      log(`[MIC] END_STREAM sent — ${sentAudioFrames} frame(s), ${sentAudioBytes} bytes`);
+      setTesterState('Mic ended — waiting for Gemini voice reply…');
+    }
+
+    async function checkStatus() {
+      try {
+        const res = await fetch('/api/gemini/status');
+        const data = await res.json();
+        if (data.ok) {
+          badge.className = 'badge online';
+          badge.textContent = 'ONLINE';
+          statusSub.textContent = `API Key Pool: ${data.available}/${data.total} Available`;
+          log(`Status check: Server healthy, ${data.available} active keys.`);
+        } else {
+          badge.className = 'badge';
+          badge.textContent = 'NO KEYS';
+          statusSub.textContent = 'API keys exhausted or missing';
+          log('Warning: No active Gemini API keys available.');
+        }
+      } catch (e) {
+        badge.className = 'badge';
+        badge.textContent = 'OFFLINE';
+        statusSub.textContent = 'Backend unreachable';
+        log('Error: Failed to reach backend server.');
+      }
+    }
+
+    checkStatus();
+    setInterval(checkStatus, 10000);
+  </script>
+</body>
+</html>

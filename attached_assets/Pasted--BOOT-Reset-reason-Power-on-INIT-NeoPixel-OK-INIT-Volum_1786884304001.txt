@@ -1,0 +1,61 @@
+
+[BOOT] Reset reason: Power-on
+[INIT] NeoPixel OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving 080fd642-8b6f-49f5-bb1d-7ad27c6fa6c0-00-19ofuxkmgpdio.sisko.replit.dev...
+[NET] Resolved to: 34.100.254.222
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✓ (Server reachable)
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] Installing DAC I2S...
+[INIT] DAC I2S OK
+[INIT] Free heap before WS: 210676
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[WS] Connected ✓
+[WS] TXT: {"serverHello":{"status":"connecting","target":"esp32"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ok"}}
+[WS] Server hello/keepalive ack
+[WS] TXT: {"serverHello":{"status":"ready","target":"esp32","model":"models/gemini-3.1-flash-live-preview"},"setupComplete":true}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=313 threshold=260
+[MIC] END_STREAM rms=13 silence_frames=12 frames=25 bytes=19456 duration=2066ms
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] START_STREAM rms=394 threshold=260
+[MIC] END_STREAM rms=81 silence_frames=12 frames=18 bytes=9728 duration=289ms
+[MIC] START_STREAM rms=403 threshold=260
+[NET] Keepalive sent
+[WS] TXT: {"pong":1}
+[WS] Server hello/keepalive ack
+[MIC] END_STREAM rms=13 silence_frames=12 frames=48 bytes=34816 duration=1569ms
+[WS] AI audio frame #1 (2 bytes)
+[WS] AI audio frame #2 (9600 bytes)
+[WS] AI audio frame too large, dropped (9600 bytes)
+[WS] AI audio frame #3 (7680 bytes)
+[WS] AI audio frame too large, dropped (9600 bytes)
+[WS] AI audio frame too large, dropped (9600 bytes)
+[WS] AI audio frame too large, dropped (11520 bytes)
+[WS] AI audio frame #10 (13440 bytes)
+[WS] AI audio frame too large, dropped (13440 bytes)
+[WS] AI audio frame too large, dropped (9600 bytes)
+[WS] Disconnected (failure #1, library retry interval active)

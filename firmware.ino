@@ -12,6 +12,7 @@
 const char* WS_HOST = "84e5f6f5-8b76-47a1-9e8f-3b6d66fb59b5-00-chnz7sm2kfqn.pike.replit.dev";
 const int   WS_PORT = 443;
 const char* WS_PATH = "/ws/esp32";
+const char* FW_BUILD_TAG = "ws-memory-fix-32q";
 
 // ── Hardware pins ───────────────────────────────────────────────────
 #define MOTOR_A1       16
@@ -578,6 +579,7 @@ void setup() {
   Serial.println("\n\n═══════════════════════════════════════");
   Serial.println("  ALEXATRON BOOT");
   Serial.println("═══════════════════════════════════════");
+  Serial.printf("[INIT] Firmware: %s\n", FW_BUILD_TAG);
   printBootReason();
 
   pixels.begin();
@@ -676,6 +678,9 @@ void setup() {
 
   Serial.print("[INIT] Free heap before WS: ");
   Serial.println(ESP.getFreeHeap());
+  if (ESP.getFreeHeap() < 80000) {
+    Serial.println("[WARN] Heap is low for TLS WebSocket; use the latest 32-block firmware build");
+  }
   
   // REMOVED: enableHeartbeat — buggy sa lumang WebSockets library
   // REMOVED: setInsecure — not supported

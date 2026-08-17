@@ -1,0 +1,143 @@
+ OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+
+[BOOT] Reset reason: Power-on
+[INIT] NeoPixel OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: FAILED for  60568 ms
+*wm:StartAP with SSID:  Alexatron
+*wm:AP IP address: 192.168.4.1
+*wm:Starting Web Portal 
+*wm:1 networks found
+*wm:Connecting to NEW AP: Infinix SMART 10 Plus
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:Connect to new AP [SUCCESS] 
+*wm:Got IP Address: 
+*wm:10.56.96.207 
+*wm:config portal exiting 
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving 84e5f6f5-8b76-47a1-9e8f-3b6d66fb59b5-00-chnz7sm2kfqn.pike.replit.dev...
+[NET] Resolved to: 34.93.221.142
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✗ (code: 404)
+[NET] WARNING: Server HTTPS not reachable!
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] PCM5102 DAC I2S OK (BCK GPIO 4, WS GPIO 5, DIN GPIO 6, 24kHz)
+[INIT] Audio jitter queue ready (64 blocks / 2.7s)
+[AUDIO TEST] PCM5102 I2S: 440Hz tone for 1 second
+[AUDIO TEST] PCM5102 tone ended
+[INIT] Free heap before WS: 32640
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #1, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #2, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #3, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #4, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #5, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #6, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #7, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #8, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #9, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #10, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #11, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #12, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #13, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #14, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #15, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #16, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #17, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #18, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #19, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #20, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #21, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #22, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #23, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #24, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #25, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #26, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #27, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #28, library retry interval active)
+ OK
+[INIT] Volume: 0.32
+[INIT] Motors OK (LEDC)
+[INIT] Skipping servo (debug mode)
+[INIT] Creating WiFiManager...
+[INIT] Starting autoConnect...
+*wm:AutoConnect 
+*wm:Connecting to SAVED AP: 
+*wm:connectTimeout not set, ESP waitForConnectResult... 
+*wm:AutoConnect: SUCCESS 
+*wm:STA IP Address: 10.56.96.207
+[INIT] WiFi connected: 10.56.96.207
+
+[NET] === Network Diagnostics ===
+[NET] DNS set to 8.8.8.8, 1.1.1.1
+[NET] Resolving 84e5f6f5-8b76-47a1-9e8f-3b6d66fb59b5-00-chnz7sm2kfqn.pike.replit.dev...
+[NET] Resolved to: 34.93.221.142
+[NET] Testing HTTP connectivity...
+[NET] HTTP test ✓ (Server reachable)
+[NET] =============================
+
+[INIT] Installing Mic I2S...
+[INIT] Mic I2S OK
+[INIT] PCM5102 DAC I2S OK (BCK GPIO 4, WS GPIO 5, DIN GPIO 6, 24kHz)
+[INIT] Audio jitter queue ready (64 blocks / 2.7s)
+[AUDIO TEST] PCM5102 I2S: 440Hz tone for 1 second
+[AUDIO TEST] PCM5102 tone ended
+[INIT] Free heap before WS: 37892
+[INIT] Setup complete!
+[INIT] AUDIO_TEST_MODE = OFF
+
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #1, library retry interval active)
+[MIC] Continuous stream stopped after 0 frame(s)
+[WS] Disconnected (failure #2, library retry interval active)

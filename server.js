@@ -413,11 +413,47 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     }
   };
 
+  // Downstream pacing for the ESP32. Firehosing an entire 9–14 KB Gemini
+  // chunk as back-to-back frames puts a burst on a weak/asymmetric uplink
+  // right when the device is also trying to push mic audio — that burst
+  // is exactly what shows up as choppy playback a moment later. Trickling
+  // frames out at roughly the real playback rate keeps a steadier stream
+  // and leaves the link some breathing room instead of bursting then
+  // starving.
+  const ESP32_BYTES_PER_MS = 48; // 24kHz * 16-bit mono PCM ≈ 48 bytes/ms
+  const esp32OutQueue = [];
+  let esp32PumpTimer = null;
+
+  const clearEsp32AudioQueue = () => {
+    esp32OutQueue.length = 0;
+    if (esp32PumpTimer) {
+      clearTimeout(esp32PumpTimer);
+      esp32PumpTimer = null;
+    }
+  };
+
+  const pumpEsp32Audio = () => {
+    if (esp32PumpTimer) return; // pump already running
+    const step = () => {
+      if (clientWs.readyState !== WebSocket.OPEN || esp32OutQueue.length === 0) {
+        esp32PumpTimer = null;
+        return;
+      }
+      const frame = esp32OutQueue.shift();
+      clientWs.send(frame);
+      // Pace slightly ahead of real-time so the device's own jitter buffer
+      // stays topped up rather than racing to catch up.
+      const delayMs = Math.max(4, Math.round(frame.length / ESP32_BYTES_PER_MS) - 2);
+      esp32PumpTimer = setTimeout(step, delayMs);
+    };
+    step();
+  };
+
   const sendEsp32Audio = (pcm) => {
     for (let offset = 0; offset < pcm.length; offset += ESP32_AUDIO_FRAME_BYTES) {
-      if (clientWs.readyState !== WebSocket.OPEN) return;
-      clientWs.send(pcm.subarray(offset, Math.min(offset + ESP32_AUDIO_FRAME_BYTES, pcm.length)));
+      esp32OutQueue.push(pcm.subarray(offset, Math.min(offset + ESP32_AUDIO_FRAME_BYTES, pcm.length)));
     }
+    pumpEsp32Audio();
   };
 
   const queueUpstream = (message) => {
@@ -531,6 +567,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
 
     if (msg.serverContent?.interrupted === true) {
       console.log(`[GeminiLive:${cid}] Gemini interrupted the current response`);
+      if (target === 'esp32') clearEsp32AudioQueue();
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(target === 'esp32' ? JSON.stringify({ interrupted: true }) : str);
       }
@@ -702,6 +739,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     clientClosing = true;
     clearInterval(pingInterval);
     clearTimeout(geminiReconnectTimer);
+    clearEsp32AudioQueue();
     connSet.delete(cid);
     if (gemWs && gemWs.readyState < 2) gemWs.close();
   });

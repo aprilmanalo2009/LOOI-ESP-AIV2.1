@@ -9,7 +9,7 @@
 #include <math.h>
 
 // ── Server ──────────────────────────────────────────────────────────
-const char* WS_HOST = "330d13fb-a8e2-45b3-afff-83ade5122bdd-00-1o19hfxytftg3.pike.replit.dev";
+const char* WS_HOST = "looi-esp-aiv2-1.onrender.com";
 const int   WS_PORT = 443;
 const char* WS_PATH = "/ws/esp32";
 const char* FW_BUILD_TAG = "ws-stability-reconnect-33";

@@ -646,13 +646,18 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
           return;
         }
 
-        if (msg.event === 'start_stream' && target === 'esp32') {
-          // Kept for compatibility with older firmware. New ESP32 firmware
-          // streams continuously and Gemini's automatic activity detection
-          // decides when a turn starts.
+        if (msg.event === 'start_stream') {
+          // start_stream/end_stream are bridge commands, not Gemini Live
+          // protocol messages. Forwarding start_stream makes Gemini close the
+          // session with "Unknown name event", which looked like a random
+          // no-response on the browser tester.
           inputStreamActive = true;
           inputAudioFrames = 0;
-          console.log(`[GeminiLive:${cid}] Legacy START_STREAM ignored — ESP32 continuous audio mode`);
+          if (target === 'esp32') {
+            console.log(`[GeminiLive:${cid}] Legacy START_STREAM ignored — ESP32 continuous audio mode`);
+          } else {
+            console.log(`[GeminiLive:${cid}] Browser START_STREAM accepted`);
+          }
           return;
         }
         if (msg.event === 'end_stream' && target === 'esp32') {

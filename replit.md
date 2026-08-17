@@ -36,9 +36,11 @@ the ESP32 and monitor the serial log for `[WS] Connected ✓` and
 `[WS] Server hello/keepalive ack`, AI audio frames, and `[AUDIO] PLAYBACK_END`.
 The server splits Gemini's larger PCM responses into 2048-byte binary frames
 for compatibility with ESP32 WebSocketsClient audio callbacks. The firmware
-places those frames in a separate 64-block playback queue (about 2.7 seconds
+places those frames in a separate 40-block playback queue (about 1.7 seconds
 of 24 kHz mono audio) before writing to the PCM5102. This keeps the WebSocket
-receive loop responsive and absorbs normal mobile-hotspot jitter. The browser
+receive loop responsive and absorbs normal mobile-hotspot jitter. It also
+reconnects the Wi-Fi transport when the router drops the association instead
+of relying only on the WebSocket retry loop. The browser
 tester uses a 350 ms jitter buffer and waits for its queued audio to finish
 before closing the session.
 The firmware plays those 24 kHz, 16-bit mono PCM frames through the PCM5102

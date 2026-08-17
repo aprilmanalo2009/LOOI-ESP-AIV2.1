@@ -9,10 +9,10 @@
 #include <math.h>
 
 // ── Server ──────────────────────────────────────────────────────────
-const char* WS_HOST = "84e5f6f5-8b76-47a1-9e8f-3b6d66fb59b5-00-chnz7sm2kfqn.pike.replit.dev";
+const char* WS_HOST = "330d13fb-a8e2-45b3-afff-83ade5122bdd-00-1o19hfxytftg3.pike.replit.dev";
 const int   WS_PORT = 443;
 const char* WS_PATH = "/ws/esp32";
-const char* FW_BUILD_TAG = "ws-memory-fix-32q";
+const char* FW_BUILD_TAG = "ws-stability-reconnect-33";
 
 // ── Hardware pins ───────────────────────────────────────────────────
 #define MOTOR_A1       16
@@ -57,7 +57,7 @@ volatile float audioLevel = 0.0f;
 #define MIC_CHUNK_SAMPLES 512
 #define MAX_CHUNK_SIZE 8192
 #define AUDIO_QUEUE_BLOCK_BYTES 2048
-#define AUDIO_QUEUE_BLOCK_COUNT 32
+#define AUDIO_QUEUE_BLOCK_COUNT 40
 uint8_t tempBuffer[MAX_CHUNK_SIZE];
 uint8_t b64DecodeBuf[MAX_CHUNK_SIZE];
 
@@ -74,6 +74,8 @@ const int MAX_FAILURES_BEFORE_RESTART = 30;
 // Manual keepalive (para sa Globe idle timeout)
 unsigned long lastKeepalive = 0;
 const unsigned long KEEPALIVE_INTERVAL = 15000; // Keep proxy/NAT mappings warm
+unsigned long lastWiFiRecoveryAttempt = 0;
+const unsigned long WIFI_RECOVERY_INTERVAL = 10000;
 
 const IPAddress GOOGLE_DNS(8, 8, 8, 8);
 const IPAddress CLOUDFLARE_DNS(1, 1, 1, 1);
@@ -553,6 +555,18 @@ bool checkInternetConnectivity() {
   }
 }
 
+void maintainWiFiConnection() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  if (millis() - lastWiFiRecoveryAttempt < WIFI_RECOVERY_INTERVAL) return;
+
+  lastWiFiRecoveryAttempt = millis();
+  isWSConnected = false;
+  isGeminiReady = false;
+  clearAudioQueue();
+  Serial.printf("[NET] WiFi disconnected (status %d) — reconnecting...\n", WiFi.status());
+  WiFi.reconnect();
+}
+
 bool resolveHost() {
   IPAddress resolvedIP;
   Serial.printf("[NET] Resolving %s...\n", WS_HOST);
@@ -608,6 +622,8 @@ void setup() {
     delay(2000);
     ESP.restart();
   }
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(false);
   
   Serial.println("[INIT] WiFi connected: " + WiFi.localIP().toString());
   
@@ -700,6 +716,7 @@ void setup() {
 // --------------------
 
 void loop() {
+  maintainWiFiConnection();
   webSocket.loop();
 
   if (motorsActive && millis() > moveStopAt) stopMotors();

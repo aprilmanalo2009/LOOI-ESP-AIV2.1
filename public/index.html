@@ -219,7 +219,7 @@
         }
         return;
       }
-      if (!playbackPumpTimer) playbackPump();
+      if (!playbackPumpTimer) pumpPlayback();
     }
 
     function closeTesterSocket() {
@@ -246,7 +246,10 @@
             log('[WS] Gemini session ready');
             setTesterState(micStreaming ? 'Listening — speak now' : 'Connected — ready to test');
           } else {
-            log('[WS] Server connected — Gemini session is starting');
+            log(`[WS] Gemini session ${status || 'starting'}`);
+            if (status === 'reconnecting') {
+              setTesterState('Reconnecting to Gemini…');
+            }
           }
         } else {
           // Gemini Live nests audio under modelTurn.parts[].inlineData.
@@ -292,6 +295,11 @@
           startButton.disabled = false;
           stopButton.disabled = true;
           setTesterState('Connection closed');
+        } else if (awaitingResponse) {
+          awaitingResponse = false;
+          startButton.disabled = false;
+          stopButton.disabled = true;
+          setTesterState('Connection closed — ready to retry');
         }
       };
     }
@@ -339,6 +347,8 @@
           testerSocket.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('WebSocket connection failed')); }, { once: true });
         });
 
+        // The bridge consumes this command locally. It must never be sent
+        // directly to Gemini Live (which rejects unknown "event" fields).
         testerSocket.send(JSON.stringify({ event: 'start_stream' }));
         micStreaming = true;
         awaitingResponse = false;

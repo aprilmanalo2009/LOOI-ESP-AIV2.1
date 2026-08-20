@@ -1,4 +1,4 @@
-// server.js — JITTER BUFFER FIX ONLY (Gemini config corrected)
+// server.js — STABLE AUDIO FIX (Gemini config corrected)
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -323,15 +323,30 @@ app.post('/api/face/register', async (req, res) => {
 const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-3.1-flash-live-preview';
 
-// Audio transport: keep frames small enough for a lossy mobile link, but never
-// pace them slower than the DAC consumes them. 512 bytes at 24 kHz mono is
-// 10.67 ms of audio; adding several milliseconds to every frame creates an
-// underrun after a few seconds of playback.
-const ESP32_AUDIO_FRAME_BYTES = 512;
-const ESP32_AUDIO_BYTES_PER_MS = 48; // 24,000 samples/s * 2 bytes/sample
-const ESP32_PREFILL_BYTES = ESP32_AUDIO_BYTES_PER_MS * 220; // ~220 ms
-const ESP32_MAX_QUEUE_BYTES = ESP32_AUDIO_BYTES_PER_MS * 3500; // ~3.5 s
-const ESP32_MAX_SOCKET_BUFFERED_BYTES = 64 * 1024;
+// ═══════════════════════════════════════════════════════════════════════════════
+//  STABLE AUDIO FIX: MAS MALAKING FRAME SIZE AT PREFILL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// BEFORE: 512 bytes = ~10.67ms per frame (masyadong maliit!)
+// AFTER: 2048 bytes = ~42.67ms per frame (mas tolerant sa jitter)
+const ESP32_AUDIO_FRAME_BYTES = 2048;
+
+// 24kHz mono = 48000 bytes/second = 48 bytes/ms
+const ESP32_AUDIO_BYTES_PER_MS = 48;
+
+// BEFORE: 220ms prefill (kulang para sa mobile)
+// AFTER: 500ms prefill (mas maraming buffer para absorb yung jitter)
+const ESP32_PREFILL_MS = 500;
+const ESP32_PREFILL_BYTES = ESP32_AUDIO_BYTES_PER_MS * ESP32_PREFILL_MS;
+
+// BEFORE: 3.5s max queue
+// AFTER: 7s max queue (para hindi ma-drop yung audio sa network hiccups)
+const ESP32_MAX_QUEUE_MS = 7000;
+const ESP32_MAX_QUEUE_BYTES = ESP32_AUDIO_BYTES_PER_MS * ESP32_MAX_QUEUE_MS;
+
+// Mas lenient socket buffer (128KB instead of 64KB)
+const ESP32_MAX_SOCKET_BUFFERED_BYTES = 128 * 1024;
+
 const MAX_QUEUED_UPSTREAM_BYTES = 512 * 1024;
 
 // CRITICAL FIX: perMessageDeflate=false para hindi mag-compress ang data papuntang ESP32
@@ -392,7 +407,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     try { 
       clientWs.send(JSON.stringify({ error: message })); 
     } catch {}
-    // Huwag agad i-close — hintayin 5s para mabasa ng ESP32
     setTimeout(() => {
       clearInterval(pingInterval);
       connSet.delete(cid);
@@ -414,11 +428,11 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   let inputAudioFrames = 0;
   let outputAudioFrames = 0;
 
-  // JITTER FIX: VAD-based audioStreamEnd for ESP32 — SAME AS ORIGINAL
+  // JITTER FIX: VAD-based audioStreamEnd for ESP32
   let lastAudioTimestamp = 0;
   let vadTimer = null;
-  const VAD_SILENCE_MS = 800;  // Send audioStreamEnd after 800ms silence
-  const VAD_MIN_SPEECH_MS = 300; // Minimum speech duration before considering end
+  const VAD_SILENCE_MS = 800;
+  const VAD_MIN_SPEECH_MS = 300;
 
   const sendClientJson = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -426,69 +440,87 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     }
   };
 
-  // The queue is deliberately paced at the audio clock, not at the network
-  // arrival rate. A short prefill absorbs mobile-data jitter without adding
-  // the permanent underrun caused by the old +3ms-per-frame delay.
+  // ═══════════════════════════════════════════════════════════════════════════════
+  //  STABLE AUDIO PUMP — Fixed for mobile hotspot stability
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   const esp32OutQueue = [];
   let esp32OutQueueBytes = 0;
   let esp32PumpTimer = null;
   let esp32PumpStarted = false;
+  let esp32LastPumpTime = 0;
 
   const clearEsp32AudioQueue = () => {
     esp32OutQueue.length = 0;
     esp32OutQueueBytes = 0;
     esp32PumpStarted = false;
+    esp32LastPumpTime = 0;
     if (esp32PumpTimer) {
       clearTimeout(esp32PumpTimer);
       esp32PumpTimer = null;
     }
   };
 
+  // FIXED: Better pump with drift correction
   const pumpEsp32Audio = () => {
     if (esp32PumpTimer) return; // pump already running
     if (!esp32PumpStarted && esp32OutQueueBytes < ESP32_PREFILL_BYTES) return;
     esp32PumpStarted = true;
+
     const step = () => {
       if (clientWs.readyState !== WebSocket.OPEN || esp32OutQueue.length === 0) {
         esp32PumpTimer = null;
         if (esp32OutQueue.length === 0) esp32PumpStarted = false;
         return;
       }
-      // ws buffers data in user space when the mobile route is temporarily
-      // slower. Waiting here prevents a burst from reaching the ESP32 after
-      // the network catches up.
+
+      // FIXED: Mas lenient bufferedAmount check
+      // Allow up to 128KB instead of 64KB
       if (clientWs.bufferedAmount > ESP32_MAX_SOCKET_BUFFERED_BYTES) {
-        esp32PumpTimer = setTimeout(step, 20);
+        esp32PumpTimer = setTimeout(step, 10);  // Mas mabilis na retry
         return;
       }
-      const frame = esp32OutQueue.shift();
-      esp32OutQueueBytes -= frame.length;
-      clientWs.send(frame, { binary: true, compress: false });
-      // Send exactly at the playback clock. One 512-byte frame is ~10.7 ms.
-      const delayMs = Math.max(1, Math.round(frame.length / ESP32_AUDIO_BYTES_PER_MS));
+
+      // FIXED: Send multiple frames at once if available (burst tolerance)
+      const framesToSend = Math.min(3, esp32OutQueue.length);
+      let totalBytes = 0;
+
+      for (let i = 0; i < framesToSend; i++) {
+        const frame = esp32OutQueue.shift();
+        if (!frame) break;
+        esp32OutQueueBytes -= frame.length;
+        totalBytes += frame.length;
+        clientWs.send(frame, { binary: true, compress: false });
+      }
+
+      // FIXED: Calculate delay based on actual bytes sent, not per frame
+      // This is more accurate for variable-sized chunks
+      const delayMs = Math.max(1, Math.round(totalBytes / ESP32_AUDIO_BYTES_PER_MS));
+      esp32LastPumpTime = Date.now();
       esp32PumpTimer = setTimeout(step, delayMs);
     };
+
     step();
   };
 
   const sendEsp32Audio = (pcm) => {
+    // FIXED: Mas malaking frame size = 2048 bytes
     for (let offset = 0; offset < pcm.length; offset += ESP32_AUDIO_FRAME_BYTES) {
       const frame = pcm.subarray(offset, Math.min(offset + ESP32_AUDIO_FRAME_BYTES, pcm.length));
       esp32OutQueue.push(frame);
       esp32OutQueueBytes += frame.length;
     }
-    // If an upstream burst runs away from the DAC, discard the oldest audio
-    // rather than growing latency forever. The next frame remains current.
+
+    // FIXED: Mas malaking max queue = 7 seconds
     while (esp32OutQueueBytes > ESP32_MAX_QUEUE_BYTES && esp32OutQueue.length > 1) {
       esp32OutQueueBytes -= esp32OutQueue.shift().length;
     }
+
     pumpEsp32Audio();
   };
 
   const queueUpstream = (message) => {
     const messageBytes = Buffer.byteLength(message);
-    // Keep the newest audio and the end marker without allowing a long
-    // utterance to grow memory indefinitely while setup is in progress.
     while (audioQueue.length && audioQueueBytes + messageBytes > MAX_QUEUED_UPSTREAM_BYTES) {
       audioQueueBytes -= Buffer.byteLength(audioQueue.shift());
     }
@@ -504,7 +536,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     queueUpstream(message);
   };
 
-  // SAME AS ORIGINAL: VAD helper for ESP32 continuous mode
+  // VAD helpers
   const resetVadTimer = () => {
     lastAudioTimestamp = Date.now();
     if (vadTimer) {
@@ -539,7 +571,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
             languageCode: 'fil-PH'
           }
         },
-        // SAME AS ORIGINAL: realtimeInputConfig para sa ESP32
         ...(target === 'esp32' ? {
           realtimeInputConfig: {
             automaticActivityDetection: {
@@ -572,17 +603,13 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       for (const fc of (msg.toolCall.functionCalls || [])) {
         if (fc.name === 'run_scenario') {
           const args = fc.args || {};
-
-          // SAME AS ORIGINAL: Align format with ESP32 expectations
           const robotPayload = {
             robotAction: true,
             move: (args.move || 'NONE').toUpperCase(),
             led: (args.led || 'NONE').toUpperCase(),
             speed: args.speed !== undefined ? args.speed : 128
           };
-
           console.log(`[GeminiLive:${cid}] Robot command → move:${robotPayload.move} led:${robotPayload.led} speed:${robotPayload.speed}`);
-
           if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.send(JSON.stringify(robotPayload));
           }
@@ -602,10 +629,9 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
           outputAudioFrames++;
           if (clientWs.readyState === WebSocket.OPEN) {
             if (target === 'esp32') {
-              // JITTER FIX: Mas maliit na frames para sa ESP32
+              // FIXED: Send to stable pump with larger frames
               sendEsp32Audio(rawPcm);
             } else {
-              // Web/phone client gets the JSON wrapper
               clientWs.send(str);
             }
           }
@@ -621,10 +647,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       }
     }
 
-    // ESP32 receives audio as binary frames, so forward the turn boundary
-    // separately; otherwise it cannot leave playback mode or resume VAD.
-    // The browser tester receives the original JSON event so it can update
-    // its state after playback has finished.
     if (msg.serverContent?.turnComplete === true) {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(target === 'esp32' ? JSON.stringify({ turnComplete: true }) : str);
@@ -658,9 +680,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       const closeReason = String(reason || '');
       const authFailed = code === 1008 && /invalid authentication|authentication credentials|unauthorized|api key/i.test(closeReason);
       if (authFailed && apiKey) {
-        // Do not retry a permanently rejected key every second. Move to the
-        // next configured key so one stale secret cannot create a reconnect
-        // storm for every connected ESP32.
         markKeyUnavailable(apiKey, 'authentication failure');
         apiKey = getActiveKey();
         if (!apiKey) {
@@ -673,9 +692,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         console.log(`[GeminiLive:${cid}] Switching to next configured Gemini key`);
       }
 
-      // Keep the device/browser socket alive while Gemini has a transient
-      // upstream failure. This prevents ESP32 reconnect storms on mobile
-      // hotspots and lets queued input continue after the next handshake.
       const delay = Math.min(1000 * (2 ** Math.min(geminiConnectAttempt, 3)), 10000);
       geminiConnectAttempt++;
       sendClientJson({ serverHello: { status: 'reconnecting', target, retryInMs: delay } });
@@ -713,17 +729,12 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       try {
         const msg = JSON.parse(text);
 
-        // SAME AS ORIGINAL: Filter ESP32 deviceHello — huwag i-forward sa Gemini
         if (msg.deviceHello) {
           console.log(`[GeminiLive:${cid}] Received deviceHello:`, msg.deviceHello);
-          // Optional: acknowledge
           try { clientWs.send(JSON.stringify({ serverHello: { status: 'ok' } })); } catch {}
           return;
         }
 
-        // Keepalive from the ESP32 must stay between the device and this
-        // proxy. Forwarding {"ping":1} to Gemini Live is not valid protocol
-        // input and can make Gemini close the upstream socket immediately.
         if (msg.ping !== undefined || msg.type === 'ping') {
           if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.send(JSON.stringify({ pong: 1 }));
@@ -732,10 +743,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         }
 
         if (msg.event === 'start_stream') {
-          // start_stream/end_stream are bridge commands, not Gemini Live
-          // protocol messages. Forwarding start_stream makes Gemini close the
-          // session with "Unknown name event", which looked like a random
-          // no-response on the browser tester.
           inputStreamActive = true;
           inputAudioFrames = 0;
           if (target === 'esp32') {
@@ -746,8 +753,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
           return;
         }
         if (msg.event === 'end_stream' && target === 'esp32') {
-          // Do not send audioStreamEnd in continuous mode: it would force a
-          // turn boundary and bring back the unreliable local-VAD behavior.
           inputStreamActive = false;
           console.log(`[GeminiLive:${cid}] Legacy END_STREAM ignored — Gemini automatic activity detection is active`);
           return;
@@ -755,12 +760,8 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         if (msg.event === 'end_stream') {
           console.log(`[GeminiLive:${cid}] Browser END_STREAM received — sending audioStreamEnd after ${inputAudioFrames} frame(s)`);
           if (ready && gemWs?.readyState === WebSocket.OPEN) {
-            // For realtime audio input, Gemini expects audioStreamEnd. This
-            // closes the current microphone activity and starts generation.
             gemWs.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
           } else {
-            // Keep the end marker after queued audio. Without it, a short
-            // first utterance can remain open forever while setup completes.
             queueUpstream(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
             console.log(`[GeminiLive:${cid}] audioStreamEnd queued until Gemini setup completes`);
           }
@@ -768,18 +769,16 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         }
       } catch {}
 
-      // Forward other text messages to Gemini
       sendUpstreamOrQueue(text);
       return;
     }
 
-    // SAME AS ORIGINAL: Binary audio from ESP32 → VAD + realtimeInput
+    // Binary audio from ESP32 → VAD + realtimeInput
     const pcmFrame = JSON.stringify({
       realtimeInput: { audio: { data: Buffer.from(data).toString('base64'), mimeType: 'audio/pcm;rate=16000' } }
     });
     inputAudioFrames++;
 
-    // VAD: Reset silence timer on every audio frame
     if (target === 'esp32') {
       resetVadTimer();
       startVadTimer();

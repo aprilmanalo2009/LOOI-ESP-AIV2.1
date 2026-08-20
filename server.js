@@ -320,7 +320,7 @@ app.post('/api/face/register', async (req, res) => {
 
 // ── WebSocket Server Setup for Phone & ESP32 ─────────────────
 const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-3.1-flash-live-preview';
+const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-2.0-flash-live-001';
 const ESP32_AUDIO_FRAME_BYTES = 2048;
 const MAX_QUEUED_UPSTREAM_BYTES = 512 * 1024;
 
@@ -367,6 +367,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   const connSet = target === 'esp32' ? connections.esp32 : connections.gemini;
   connSet.add(cid);
 
+  // Ping client every 20s to keep Render proxy alive
   const pingInterval = setInterval(() => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.ping();
@@ -400,6 +401,9 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   let inputAudioFrames = 0;
   let outputAudioFrames = 0;
   let lastAudioForwardLog = 0;
+  let geminiPingTimer = null;
+  let totalGeminiReconnects = 0;
+  const MAX_GEMINI_RECONNECTS = 10; // Prevent reconnect storms
 
   const sendClientJson = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -458,139 +462,163 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     queueUpstream(message);
   };
 
+  const cleanupGemini = () => {
+    if (geminiPingTimer) {
+      clearInterval(geminiPingTimer);
+      geminiPingTimer = null;
+    }
+    if (geminiReconnectTimer) {
+      clearTimeout(geminiReconnectTimer);
+      geminiReconnectTimer = null;
+    }
+    if (gemWs && gemWs.readyState < 2) {
+      gemWs.close();
+    }
+    gemWs = null;
+    ready = false;
+  };
+
   const bindGeminiSocket = (socket) => {
     socket.on('open', () => {
-    console.log(`[GeminiLive:${cid}] Gemini WS opened`);
-    geminiConnectAttempt = 0;
+      console.log(`[GeminiLive:${cid}] Gemini WS opened (attempt ${geminiConnectAttempt + 1})`);
 
-    const setupPayload = {
-      setup: {
-        model: GEMINI_LIVE_MODEL,
-        generationConfig: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-            languageCode: 'fil-PH'
-          }
-        },
-        ...(target === 'esp32' ? {
-          // CRITICAL FIX: Proper realtimeInputConfig with VAD sensitivity
-          realtimeInputConfig: {
-            automaticActivityDetection: {
-              disabled: false,
-              // HIGH sensitivity = mas mabilis mag-detect ng speech start
-              startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
-              // LOW sensitivity = mas matagal bago mag-end ang turn
-              endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
-              prefixPaddingMs: 60,
-              silenceDurationMs: 400
-            },
-            // Include all audio input in the turn (not just detected activity)
-            turnCoverage: 'TURN_INCLUDES_ALL_INPUT'
-          }
-        } : {}),
-        tools: ROBOT_TOOLS,
-        systemInstruction: { parts: [{ text: GEMINI_LIVE_SYSTEM }] }
-      }
-    };
+      // CRITICAL FIX: Send ping to Gemini every 15s to prevent timeout
+      if (geminiPingTimer) clearInterval(geminiPingTimer);
+      geminiPingTimer = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.ping();
+        }
+      }, 15000);
 
-    socket.send(JSON.stringify(setupPayload));
+      const setupPayload = {
+        setup: {
+          model: GEMINI_LIVE_MODEL,
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+              languageCode: 'fil-PH'
+            }
+          },
+          // Only add realtimeInputConfig for ESP32 (continuous audio mode)
+          ...(target === 'esp32' ? {
+            realtimeInputConfig: {
+              automaticActivityDetection: {
+                disabled: false,
+                startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
+                endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+                prefixPaddingMs: 60,
+                silenceDurationMs: 400
+              }
+            }
+          } : {}),
+          tools: ROBOT_TOOLS,
+          systemInstruction: { parts: [{ text: GEMINI_LIVE_SYSTEM }] }
+        }
+      };
+
+      socket.send(JSON.stringify(setupPayload));
     });
 
     socket.on('message', (data) => {
-    const str = data.toString();
-    let msg;
-    try { msg = JSON.parse(str); } catch { return; }
+      const str = data.toString();
+      let msg;
+      try { msg = JSON.parse(str); } catch { return; }
 
-    if (msg.error) {
-      const errorText = typeof msg.error === 'string'
-        ? msg.error
-        : msg.error.message || JSON.stringify(msg.error);
-      console.error(`[GeminiLive:${cid}] Gemini protocol error: ${errorText}`);
-      sendClientJson({ error: errorText });
-      return;
-    }
+      if (msg.error) {
+        const errorText = typeof msg.error === 'string'
+          ? msg.error
+          : msg.error.message || JSON.stringify(msg.error);
+        console.error(`[GeminiLive:${cid}] Gemini protocol error: ${errorText}`);
+        sendClientJson({ error: errorText });
+        return;
+      }
 
-    if (msg.toolCall) {
-      const immediateResponses = [];
-      for (const fc of (msg.toolCall.functionCalls || [])) {
-        if (fc.name === 'run_scenario') {
-          const args = fc.args || {};
-          const robotPayload = {
-            robotAction: true,
-            move: (args.move || 'NONE').toUpperCase(),
-            led: (args.led || 'NONE').toUpperCase(),
-            speed: args.speed !== undefined ? args.speed : 128
-          };
-          console.log(`[GeminiLive:${cid}] Robot command → move:${robotPayload.move} led:${robotPayload.led} speed:${robotPayload.speed}`);
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify(robotPayload));
+      if (msg.toolCall) {
+        const immediateResponses = [];
+        for (const fc of (msg.toolCall.functionCalls || [])) {
+          if (fc.name === 'run_scenario') {
+            const args = fc.args || {};
+            const robotPayload = {
+              robotAction: true,
+              move: (args.move || 'NONE').toUpperCase(),
+              led: (args.led || 'NONE').toUpperCase(),
+              speed: args.speed !== undefined ? args.speed : 128
+            };
+            console.log(`[GeminiLive:${cid}] Robot command → move:${robotPayload.move} led:${robotPayload.led} speed:${robotPayload.speed}`);
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify(robotPayload));
+            }
+            immediateResponses.push({ id: fc.id, name: fc.name, response: { output: 'executed' } });
           }
-          immediateResponses.push({ id: fc.id, name: fc.name, response: { output: 'executed' } });
         }
+        if (immediateResponses.length && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ toolResponse: { functionResponses: immediateResponses } }));
+        }
+        return;
       }
-      if (immediateResponses.length && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ toolResponse: { functionResponses: immediateResponses } }));
-      }
-      return;
-    }
 
-    if (msg.serverContent?.modelTurn?.parts) {
-      for (const part of msg.serverContent.modelTurn.parts) {
-        if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
-          const rawPcm = Buffer.from(part.inlineData.data, 'base64');
-          outputAudioFrames++;
-          if (clientWs.readyState === WebSocket.OPEN) {
-            if (target === 'esp32') {
-              sendEsp32Audio(rawPcm);
-            } else {
-              clientWs.send(str);
+      if (msg.serverContent?.modelTurn?.parts) {
+        for (const part of msg.serverContent.modelTurn.parts) {
+          if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
+            const rawPcm = Buffer.from(part.inlineData.data, 'base64');
+            outputAudioFrames++;
+            if (clientWs.readyState === WebSocket.OPEN) {
+              if (target === 'esp32') {
+                sendEsp32Audio(rawPcm);
+              } else {
+                clientWs.send(str);
+              }
             }
           }
         }
       }
-    }
 
-    if (msg.serverContent?.interrupted === true) {
-      console.log(`[GeminiLive:${cid}] Gemini interrupted the current response`);
-      if (target === 'esp32') clearEsp32AudioQueue();
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(target === 'esp32' ? JSON.stringify({ interrupted: true }) : str);
+      if (msg.serverContent?.interrupted === true) {
+        console.log(`[GeminiLive:${cid}] Gemini interrupted the current response`);
+        if (target === 'esp32') clearEsp32AudioQueue();
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(target === 'esp32' ? JSON.stringify({ interrupted: true }) : str);
+        }
       }
-    }
 
-    if (msg.serverContent?.turnComplete === true) {
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(target === 'esp32' ? JSON.stringify({ turnComplete: true }) : str);
+      if (msg.serverContent?.turnComplete === true) {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(target === 'esp32' ? JSON.stringify({ turnComplete: true }) : str);
+        }
+        console.log(`[GeminiLive:${cid}] Gemini turn complete (${outputAudioFrames} audio frame(s))`);
+        outputAudioFrames = 0;
       }
-      console.log(`[GeminiLive:${cid}] Gemini turn complete (${outputAudioFrames} audio frame(s))`);
-      outputAudioFrames = 0;
-    }
 
-    if (msg.setupComplete !== undefined) {
-      ready = true;
-      console.log(`[GeminiLive:${cid}] Gemini setup complete (${GEMINI_LIVE_MODEL})`);
-      sendClientJson({
-        serverHello: { status: 'ready', target, model: GEMINI_LIVE_MODEL },
-        setupComplete: true,
-      });
-      for (const c of audioQueue) {
-        if (socket.readyState === WebSocket.OPEN) socket.send(c);
+      if (msg.setupComplete !== undefined) {
+        ready = true;
+        geminiConnectAttempt = 0; // Reset on successful setup
+        totalGeminiReconnects = 0;
+        console.log(`[GeminiLive:${cid}] ✅ Gemini setup complete (${GEMINI_LIVE_MODEL})`);
+        sendClientJson({
+          serverHello: { status: 'ready', target, model: GEMINI_LIVE_MODEL },
+          setupComplete: true,
+        });
+        for (const c of audioQueue) {
+          if (socket.readyState === WebSocket.OPEN) socket.send(c);
+        }
+        audioQueue.length = 0;
+        audioQueueBytes = 0;
       }
-      audioQueue.length = 0;
-      audioQueueBytes = 0;
-    }
     });
 
     socket.on('close', (code, reason) => {
       if (socket !== gemWs) return;
-      gemWs = null;
-      ready = false;
-      console.log(`[GeminiLive:${cid}] Gemini disconnected: ${code} ${reason || ''}`);
+
+      const reasonStr = String(reason || '');
+      console.log(`[GeminiLive:${cid}] ❌ Gemini disconnected: code=${code} reason="${reasonStr}"`);
+
+      cleanupGemini();
+
       if (clientClosing || clientWs.readyState !== WebSocket.OPEN) return;
 
-      const closeReason = String(reason || '');
-      const authFailed = code === 1008 && /invalid authentication|authentication credentials|unauthorized|api key/i.test(closeReason);
+      // Check for auth failure
+      const authFailed = code === 1008 && /invalid authentication|authentication credentials|unauthorized|api key/i.test(reasonStr);
       if (authFailed && apiKey) {
         markKeyUnavailable(apiKey, 'authentication failure');
         apiKey = getActiveKey();
@@ -604,10 +632,28 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         console.log(`[GeminiLive:${cid}] Switching to next configured Gemini key`);
       }
 
-      const delay = Math.min(1000 * (2 ** Math.min(geminiConnectAttempt, 3)), 10000);
+      // CRITICAL FIX: Max reconnect limit to prevent storms
+      totalGeminiReconnects++;
+      if (totalGeminiReconnects > MAX_GEMINI_RECONNECTS) {
+        console.error(`[GeminiLive:${cid}] ⛔ Max reconnects (${MAX_GEMINI_RECONNECTS}) reached. Giving up.`);
+        sendClientJson({ error: `Gemini disconnected ${MAX_GEMINI_RECONNECTS} times. Check API key or network.` });
+        setTimeout(() => {
+          if (!clientClosing && clientWs.readyState === WebSocket.OPEN) {
+            clientWs.close(1011, 'Max Gemini reconnects exceeded');
+          }
+        }, 5000);
+        return;
+      }
+
+      // Exponential backoff with jitter, capped at 30s
       geminiConnectAttempt++;
+      const baseDelay = Math.min(1000 * Math.pow(2, Math.min(geminiConnectAttempt, 5)), 30000);
+      const jitter = Math.floor(Math.random() * 1000);
+      const delay = baseDelay + jitter;
+
+      console.log(`[GeminiLive:${cid}] 🔄 Reconnecting to Gemini in ${delay}ms (attempt ${geminiConnectAttempt}, total ${totalGeminiReconnects})`);
       sendClientJson({ serverHello: { status: 'reconnecting', target, retryInMs: delay } });
-      clearTimeout(geminiReconnectTimer);
+
       geminiReconnectTimer = setTimeout(() => {
         geminiReconnectTimer = null;
         connectGemini();
@@ -615,7 +661,14 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     });
 
     socket.on('error', (err) => {
-      console.error(`[GeminiLive:${cid}] Gemini error:`, err.message);
+      console.error(`[GeminiLive:${cid}] Gemini WS error:`, err.message);
+    });
+
+    // Handle Gemini pings
+    socket.on('ping', () => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.pong();
+      }
     });
   };
 
@@ -685,8 +738,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       return;
     }
 
-    // CRITICAL FIX: Binary audio from client → wrap as realtimeInput with mediaChunks → Gemini
-    // The correct Gemini Live API format uses mediaChunks array, not "audio" field directly.
+    // CRITICAL FIX: Use mediaChunks array format (correct Gemini Live API)
     const pcmFrame = JSON.stringify({
       realtimeInput: {
         mediaChunks: [{
@@ -701,7 +753,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     const now = Date.now();
     if (now - lastAudioForwardLog > 5000) {
       lastAudioForwardLog = now;
-      console.log(`[GeminiLive:${cid}] Forwarding audio to Gemini (${target}): ${data.length} bytes, total frames=${inputAudioFrames}`);
+      console.log(`[GeminiLive:${cid}] 📡 Forwarding audio to Gemini (${target}): ${data.length} bytes, total frames=${inputAudioFrames}`);
     }
 
     sendUpstreamOrQueue(pcmFrame);
@@ -711,10 +763,9 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     console.log(`[GeminiLive:${cid}] Client disconnected: ${code} ${reason || ''}`);
     clientClosing = true;
     clearInterval(pingInterval);
-    clearTimeout(geminiReconnectTimer);
+    cleanupGemini();
     clearEsp32AudioQueue();
     connSet.delete(cid);
-    if (gemWs && gemWs.readyState < 2) gemWs.close();
   });
 
   clientWs.on('error', (err) => {
@@ -722,7 +773,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   });
 
   clientWs.on('pong', () => {
-    console.log(`[GeminiLive:${cid}] Client pong received`);
+    // Client responded to our ping — connection is healthy
   });
 }
 

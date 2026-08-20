@@ -15,11 +15,11 @@ const char* WS_PATH = "/ws/esp32";
 const char* FW_BUILD_TAG = "ws-stability-reconnect-33";
 
 // ── Hardware pins ───────────────────────────────────────────────────
-#define MOTOR_A1       16
-#define MOTOR_A2       17
-#define MOTOR_B1       18
-#define MOTOR_B2       8
-#define SERVO_PIN      15
+#define MOTOR_A1       10
+#define MOTOR_A2       11
+#define MOTOR_B1       12
+#define MOTOR_B2       13
+#define SERVO_PIN      14
 #define NEO_PIN        48
 #define NEO_COUNT      1
 // PCM5102 I2S output. The PCM5102 receives standard stereo I2S while

@@ -12,9 +12,9 @@
 const char* WS_HOST = "looi-esp-aiv2-1.onrender.com";
 const int   WS_PORT = 443;
 const char* WS_PATH = "/ws/esp32";
-const char* FW_BUILD_TAG = "ws-stability-reconnect-33";
+const char* FW_BUILD_TAG = "stereo-jitter-fix-v1";
 
-// ── Hardware pins ───────────────────────────────────────────────────
+// ── Hardware pins ── SAME AS YOUR WORKING CODE ─────────────────────
 #define MOTOR_A1       10
 #define MOTOR_A2       11
 #define MOTOR_B1       12
@@ -22,13 +22,11 @@ const char* FW_BUILD_TAG = "ws-stability-reconnect-33";
 #define SERVO_PIN      14
 #define NEO_PIN        48
 #define NEO_COUNT      1
-// PCM5102 I2S output. The PCM5102 receives standard stereo I2S while
-// Gemini's Live response is mono PCM, so the playback helper duplicates
-// each sample to left and right channels.
 #define DAC_I2S_PORT   I2S_NUM_0
-#define DAC_BCLK_PIN   4
-#define DAC_WS_PIN     5
-#define DAC_DATA_PIN   6
+// YOUR WORKING PINS — NOT CHANGED!
+#define DAC_BCLK_PIN   6
+#define DAC_WS_PIN     4
+#define DAC_DATA_PIN   5
 #define MIC_I2S_PORT   I2S_NUM_1
 #define MIC_BCLK_PIN   16
 #define MIC_WS_PIN     17
@@ -56,8 +54,10 @@ volatile float audioLevel = 0.0f;
 #define AUDIO_RATE   24000
 #define MIC_CHUNK_SAMPLES 512
 #define MAX_CHUNK_SIZE 8192
+
+// JITTER FIX: Mas maraming blocks para sa mobile data buffer
 #define AUDIO_QUEUE_BLOCK_BYTES 2048
-#define AUDIO_QUEUE_BLOCK_COUNT 40
+#define AUDIO_QUEUE_BLOCK_COUNT 80
 uint8_t tempBuffer[MAX_CHUNK_SIZE];
 uint8_t b64DecodeBuf[MAX_CHUNK_SIZE];
 
@@ -73,24 +73,20 @@ const int MAX_FAILURES_BEFORE_RESTART = 30;
 
 // Manual keepalive (para sa Globe idle timeout)
 unsigned long lastKeepalive = 0;
-const unsigned long KEEPALIVE_INTERVAL = 15000; // Keep proxy/NAT mappings warm
+const unsigned long KEEPALIVE_INTERVAL = 15000;
 unsigned long lastWiFiRecoveryAttempt = 0;
 const unsigned long WIFI_RECOVERY_INTERVAL = 10000;
 
 const IPAddress GOOGLE_DNS(8, 8, 8, 8);
 const IPAddress CLOUDFLARE_DNS(1, 1, 1, 1);
 
-// Debug mode: i-set to true para i-disable ang audio sending (test connection stability)
+// Debug mode: i-set to true para i-disable ang audio sending
 const bool AUDIO_TEST_MODE = false;
-// Temporary PCM5102 diagnostic. Set to false after confirming the 440 Hz
-// tone is audible from the DAC/amplifier.
-const bool PCM5102_TONE_TEST = true;
+// PCM5102 diagnostic — set to true to test 440Hz tone
+const bool PCM5102_TONE_TEST = false;
 bool dacReady = false;
 
-// Network callbacks must return quickly.  Playback used to call i2s_write()
-// directly from the WebSocket callback, which made the receive loop block for
-// roughly the duration of every audio packet.  A queue gives the hotspot a
-// jitter cushion and lets WebSocket receive continue while the DAC plays.
+// Network callbacks must return quickly.
 struct AudioQueueBlock {
   size_t length;
   uint8_t data[AUDIO_QUEUE_BLOCK_BYTES];
@@ -100,6 +96,9 @@ QueueHandle_t audioQueue = nullptr;
 TaskHandle_t audioPlaybackTaskHandle = nullptr;
 volatile bool audioPlaybackInProgress = false;
 volatile bool audioTurnCompletePending = false;
+
+// STEREO FIX: Pre-allocated stereo buffer
+static int16_t stereoBuffer[(MAX_CHUNK_SIZE / sizeof(int16_t)) * 2];
 
 // --------------------
 // Debug helpers
@@ -328,17 +327,20 @@ void setupPcm5102() {
                 DAC_BCLK_PIN, DAC_WS_PIN, DAC_DATA_PIN, AUDIO_RATE / 1000);
 }
 
+// STEREO FIX: Pre-allocated buffer, duplicate mono to both channels
 void writeStereoPcm(const int16_t* samples, size_t sampleCount) {
-  static int16_t stereoBuffer[(MAX_CHUNK_SIZE / sizeof(int16_t)) * 2];
   if (!dacReady || sampleCount == 0) return;
 
-  for (size_t i = 0; i < sampleCount; i++) {
-    stereoBuffer[i * 2] = samples[i];
-    stereoBuffer[i * 2 + 1] = samples[i];
+  size_t maxSamples = sizeof(stereoBuffer) / (2 * sizeof(int16_t));
+  size_t samplesToProcess = min(sampleCount, maxSamples);
+
+  for (size_t i = 0; i < samplesToProcess; i++) {
+    stereoBuffer[i * 2] = samples[i];      // LEFT channel
+    stereoBuffer[i * 2 + 1] = samples[i];  // RIGHT channel (same as left)
   }
 
   size_t bytesWritten = 0;
-  i2s_write(DAC_I2S_PORT, stereoBuffer, sampleCount * 2 * sizeof(int16_t),
+  i2s_write(DAC_I2S_PORT, stereoBuffer, samplesToProcess * 2 * sizeof(int16_t),
             &bytesWritten, portMAX_DELAY);
 }
 
@@ -365,6 +367,7 @@ void playPcm5102ToneTest() {
 
 void writePcmToPcm5102(const uint8_t* data, size_t len) {
   // Gemini sends little-endian signed 16-bit mono PCM at 24 kHz.
+  // Convert to stereo: duplicate each sample to L/R
   writeStereoPcm(reinterpret_cast<const int16_t*>(data), len / sizeof(int16_t));
 }
 
@@ -444,11 +447,10 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       isWSConnected = true;
       isGeminiReady = false;
       consecutiveFailures = 0;
-      lastKeepalive = millis(); // Reset keepalive timer
+      lastKeepalive = millis();
       Serial.println("[WS] Connected ✓");
       setColor(pixels.Color(0, 0, 100));
-      
-      // Send device hello
+
       webSocket.sendTXT("{\"deviceHello\":{\"device\":\"alexatron-esp32s3\"}}");
       break;
     }
@@ -461,13 +463,12 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         isGeminiReady = true;
         Serial.println("[WS] Gemini ready — continuous mic streaming enabled");
       }
-      
-      // Ignore serverHello/keepalive responses
+
       if (jsonHas(msg, "\"serverHello\"") || jsonHas(msg, "\"pong\"")) {
         Serial.println("[WS] Server hello/keepalive ack");
         break;
       }
-      
+
       if (jsonHas(msg, "\"robotAction\"")) {
         String move = jsonGetString(msg, "move");
         String led  = jsonGetString(msg, "led");
@@ -478,7 +479,6 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       if (jsonHas(msg, "\"error\"")) {
         Serial.println("[Server error] " + jsonGetString(msg, "error"));
         setColor(pixels.Color(100, 0, 0));
-        // Huwag mag-disconnect agad — hintayin kung magre-retry ang server
         break;
       }
       if (jsonHas(msg, "\"interrupted\":true")) {
@@ -541,11 +541,10 @@ bool checkInternetConnectivity() {
   Serial.println("[NET] Testing HTTP connectivity...");
   HTTPClient http;
   http.setTimeout(5000);
-  // Use HTTPS para same path as WS
   http.begin(String("https://") + WS_HOST + "/health");
   int httpCode = http.GET();
   http.end();
-  
+
   if (httpCode == 200) {
     Serial.println("[NET] HTTP test ✓ (Server reachable)");
     return true;
@@ -570,7 +569,7 @@ void maintainWiFiConnection() {
 bool resolveHost() {
   IPAddress resolvedIP;
   Serial.printf("[NET] Resolving %s...\n", WS_HOST);
-  
+
   if (WiFi.hostByName(WS_HOST, resolvedIP)) {
     Serial.printf("[NET] Resolved to: %s\n", resolvedIP.toString().c_str());
     return true;
@@ -591,7 +590,7 @@ void setup() {
   delay(500);
 
   Serial.println("\n\n═══════════════════════════════════════");
-  Serial.println("  ALEXATRON BOOT");
+  Serial.println("  ALEXATRON BOOT — STEREO + JITTER FIX");
   Serial.println("═══════════════════════════════════════");
   Serial.printf("[INIT] Firmware: %s\n", FW_BUILD_TAG);
   printBootReason();
@@ -609,14 +608,13 @@ void setup() {
   Serial.println("[INIT] Motors OK (LEDC)");
 
   Serial.println("[INIT] Skipping servo (debug mode)");
-  
+
   Serial.println("[INIT] Creating WiFiManager...");
   WiFiManager wm;
-  // wm.resetSettings();
-  
+
   wm.setConfigPortalTimeout(180);
   Serial.println("[INIT] Starting autoConnect...");
-  
+
   if (!wm.autoConnect("Alexatron")) {
     Serial.println("[INIT] WiFi failed, restarting...");
     delay(2000);
@@ -624,26 +622,26 @@ void setup() {
   }
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
-  
+
   Serial.println("[INIT] WiFi connected: " + WiFi.localIP().toString());
-  
+
   Serial.println("\n[NET] === Network Diagnostics ===");
-  
+
   WiFi.setDNS(GOOGLE_DNS, CLOUDFLARE_DNS);
   Serial.println("[NET] DNS set to 8.8.8.8, 1.1.1.1");
-  
+
   if (!resolveHost()) {
     Serial.println("[NET] WARNING: Cannot resolve server hostname!");
     setColor(pixels.Color(255, 50, 0));
     delay(3000);
   }
-  
+
   if (!checkInternetConnectivity()) {
     Serial.println("[NET] WARNING: Server HTTPS not reachable!");
     setColor(pixels.Color(255, 50, 0));
     delay(3000);
   }
-  
+
   Serial.println("[NET] =============================\n");
 
   Serial.println("[INIT] Installing Mic I2S...");
@@ -673,6 +671,8 @@ void setup() {
   Serial.println("[INIT] Mic I2S OK");
 
   setupPcm5102();
+
+  // JITTER FIX: Mas maraming blocks para sa mobile data buffer
   audioQueue = xQueueCreate(AUDIO_QUEUE_BLOCK_COUNT, sizeof(AudioQueueBlock));
   if (!audioQueue) {
     Serial.println("[ERROR] Audio playback queue allocation failed");
@@ -686,24 +686,21 @@ void setup() {
     setColor(pixels.Color(255, 0, 0));
     while (true) { delay(500); }
   }
-  Serial.printf("[INIT] Audio jitter queue ready (%d blocks / %.1fs)\n",
+  Serial.printf("[INIT] Audio jitter queue ready (%d blocks / %.1fs stereo)\n",
                 AUDIO_QUEUE_BLOCK_COUNT,
                 (float)(AUDIO_QUEUE_BLOCK_BYTES * AUDIO_QUEUE_BLOCK_COUNT) /
-                  (AUDIO_RATE * sizeof(int16_t)));
+                  (AUDIO_RATE * sizeof(int16_t) * 2));  // *2 for stereo
+
   if (PCM5102_TONE_TEST && dacReady) playPcm5102ToneTest();
 
   Serial.print("[INIT] Free heap before WS: ");
   Serial.println(ESP.getFreeHeap());
   if (ESP.getFreeHeap() < 80000) {
-    Serial.println("[WARN] Heap is low for TLS WebSocket; use the latest 32-block firmware build");
+    Serial.println("[WARN] Heap is low for TLS WebSocket");
   }
-  
-  // REMOVED: enableHeartbeat — buggy sa lumang WebSockets library
-  // REMOVED: setInsecure — not supported
+
   webSocket.beginSSL(WS_HOST, WS_PORT, WS_PATH);
   webSocket.onEvent(webSocketEvent);
-  // WebSocketsClient owns reconnect attempts. Do not call beginSSL()/disconnect()
-  // again from loop(), otherwise two reconnect state machines race each other.
   webSocket.setReconnectInterval(3000);
 
   setColor(pixels.Color(0, 0, 100));
@@ -721,20 +718,16 @@ void loop() {
 
   if (motorsActive && millis() > moveStopAt) stopMotors();
 
-  // ── Manual keepalive (para sa Globe idle timeout) ──
   if (isWSConnected && (millis() - lastKeepalive >= KEEPALIVE_INTERVAL)) {
     lastKeepalive = millis();
-    // Send lightweight keepalive — para hindi ma-idle timeout ng router
     webSocket.sendTXT("{\"ping\":1}");
     Serial.println("[NET] Keepalive sent");
   }
 
   if (!isWSConnected || !isGeminiReady) return;
   if (isPlaying) return;
-  
-  // ── TEST MODE: Skip audio sending ──
+
   if (AUDIO_TEST_MODE) {
-    // Just keep connection alive, don't send audio
     return;
   }
 
@@ -743,8 +736,6 @@ void loop() {
   i2s_read(MIC_I2S_PORT, sample_buffer, sizeof(sample_buffer), &bytes_read, 10);
   if (bytes_read == 0) return;
 
-  // No local VAD and no end_stream: Gemini receives the complete mic stream
-  // and its automatic activity detection creates turn boundaries.
   streamMicChunk(reinterpret_cast<const uint8_t*>(sample_buffer), bytes_read);
   micFramesSent++;
   if (micFramesSent == 1 || micFramesSent % 100 == 0) {

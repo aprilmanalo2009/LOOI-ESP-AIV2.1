@@ -323,8 +323,15 @@ app.post('/api/face/register', async (req, res) => {
 const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-3.1-flash-live-preview';
 
-// FIXED JITTER: Mas maliit na frames para sa mobile data — 512 bytes para smooth
+// Audio transport: keep frames small enough for a lossy mobile link, but never
+// pace them slower than the DAC consumes them. 512 bytes at 24 kHz mono is
+// 10.67 ms of audio; adding several milliseconds to every frame creates an
+// underrun after a few seconds of playback.
 const ESP32_AUDIO_FRAME_BYTES = 512;
+const ESP32_AUDIO_BYTES_PER_MS = 48; // 24,000 samples/s * 2 bytes/sample
+const ESP32_PREFILL_BYTES = ESP32_AUDIO_BYTES_PER_MS * 220; // ~220 ms
+const ESP32_MAX_QUEUE_BYTES = ESP32_AUDIO_BYTES_PER_MS * 3500; // ~3.5 s
+const ESP32_MAX_SOCKET_BUFFERED_BYTES = 64 * 1024;
 const MAX_QUEUED_UPSTREAM_BYTES = 512 * 1024;
 
 // CRITICAL FIX: perMessageDeflate=false para hindi mag-compress ang data papuntang ESP32
@@ -419,14 +426,18 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     }
   };
 
-  // JITTER FIX: Mas mabagal na pacing para sa mobile data
-  // 24kHz * 16-bit mono PCM ≈ 48 bytes/ms (SAME AS ORIGINAL, pero may extra buffer)
-  const ESP32_BYTES_PER_MS = 48;
+  // The queue is deliberately paced at the audio clock, not at the network
+  // arrival rate. A short prefill absorbs mobile-data jitter without adding
+  // the permanent underrun caused by the old +3ms-per-frame delay.
   const esp32OutQueue = [];
+  let esp32OutQueueBytes = 0;
   let esp32PumpTimer = null;
+  let esp32PumpStarted = false;
 
   const clearEsp32AudioQueue = () => {
     esp32OutQueue.length = 0;
+    esp32OutQueueBytes = 0;
+    esp32PumpStarted = false;
     if (esp32PumpTimer) {
       clearTimeout(esp32PumpTimer);
       esp32PumpTimer = null;
@@ -435,24 +446,41 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
 
   const pumpEsp32Audio = () => {
     if (esp32PumpTimer) return; // pump already running
+    if (!esp32PumpStarted && esp32OutQueueBytes < ESP32_PREFILL_BYTES) return;
+    esp32PumpStarted = true;
     const step = () => {
       if (clientWs.readyState !== WebSocket.OPEN || esp32OutQueue.length === 0) {
         esp32PumpTimer = null;
+        if (esp32OutQueue.length === 0) esp32PumpStarted = false;
+        return;
+      }
+      // ws buffers data in user space when the mobile route is temporarily
+      // slower. Waiting here prevents a burst from reaching the ESP32 after
+      // the network catches up.
+      if (clientWs.bufferedAmount > ESP32_MAX_SOCKET_BUFFERED_BYTES) {
+        esp32PumpTimer = setTimeout(step, 20);
         return;
       }
       const frame = esp32OutQueue.shift();
-      clientWs.send(frame);
-      // JITTER FIX: Mas mabagal na pacing + extra 3ms buffer para sa mobile data
-      const delayMs = Math.max(6, Math.round(frame.length / ESP32_BYTES_PER_MS) + 3);
+      esp32OutQueueBytes -= frame.length;
+      clientWs.send(frame, { binary: true, compress: false });
+      // Send exactly at the playback clock. One 512-byte frame is ~10.7 ms.
+      const delayMs = Math.max(1, Math.round(frame.length / ESP32_AUDIO_BYTES_PER_MS));
       esp32PumpTimer = setTimeout(step, delayMs);
     };
     step();
   };
 
-  // JITTER FIX: Mas maliit na frames para smooth sa mobile data
   const sendEsp32Audio = (pcm) => {
     for (let offset = 0; offset < pcm.length; offset += ESP32_AUDIO_FRAME_BYTES) {
-      esp32OutQueue.push(pcm.subarray(offset, Math.min(offset + ESP32_AUDIO_FRAME_BYTES, pcm.length)));
+      const frame = pcm.subarray(offset, Math.min(offset + ESP32_AUDIO_FRAME_BYTES, pcm.length));
+      esp32OutQueue.push(frame);
+      esp32OutQueueBytes += frame.length;
+    }
+    // If an upstream burst runs away from the DAC, discard the oldest audio
+    // rather than growing latency forever. The next frame remains current.
+    while (esp32OutQueueBytes > ESP32_MAX_QUEUE_BYTES && esp32OutQueue.length > 1) {
+      esp32OutQueueBytes -= esp32OutQueue.shift().length;
     }
     pumpEsp32Audio();
   };

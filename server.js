@@ -1,3 +1,4 @@
+// server.js — COMPLETE FIXED VERSION
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -407,6 +408,14 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   let inputAudioFrames = 0;
   let outputAudioFrames = 0;
 
+  // ============================================
+  // CRITICAL FIX: VAD-based audioStreamEnd for ESP32
+  // ============================================
+  let lastAudioTimestamp = 0;
+  let vadTimer = null;
+  const VAD_SILENCE_MS = 800;  // Send audioStreamEnd after 800ms silence
+  const VAD_MIN_SPEECH_MS = 300; // Minimum speech duration before considering end
+  
   const sendClientJson = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify(message));
@@ -473,6 +482,29 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       return;
     }
     queueUpstream(message);
+  };
+
+  // ============================================
+  // CRITICAL FIX: VAD helper for ESP32 continuous mode
+  // ============================================
+  const resetVadTimer = () => {
+    lastAudioTimestamp = Date.now();
+    if (vadTimer) {
+      clearTimeout(vadTimer);
+      vadTimer = null;
+    }
+  };
+
+  const startVadTimer = () => {
+    if (vadTimer) clearTimeout(vadTimer);
+    vadTimer = setTimeout(() => {
+      const silenceDuration = Date.now() - lastAudioTimestamp;
+      if (silenceDuration >= VAD_SILENCE_MS && ready && gemWs?.readyState === WebSocket.OPEN) {
+        console.log(`[GeminiLive:${cid}] VAD: Sending audioStreamEnd after ${silenceDuration}ms silence`);
+        gemWs.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+      }
+      vadTimer = null;
+    }, VAD_SILENCE_MS);
   };
 
   const bindGeminiSocket = (socket) => {
@@ -725,11 +757,19 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       return;
     }
 
-    // Binary audio from client → wrap as realtimeInput → Gemini
+    // ============================================
+    // CRITICAL FIX: Binary audio from ESP32 → VAD + realtimeInput
+    // ============================================
     const pcmFrame = JSON.stringify({
       realtimeInput: { audio: { data: Buffer.from(data).toString('base64'), mimeType: 'audio/pcm;rate=16000' } }
     });
     inputAudioFrames++;
+
+    // VAD: Reset silence timer on every audio frame
+    if (target === 'esp32') {
+      resetVadTimer();
+      startVadTimer();
+    }
 
     sendUpstreamOrQueue(pcmFrame);
   });
@@ -739,6 +779,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     clientClosing = true;
     clearInterval(pingInterval);
     clearTimeout(geminiReconnectTimer);
+    if (vadTimer) clearTimeout(vadTimer);
     clearEsp32AudioQueue();
     connSet.delete(cid);
     if (gemWs && gemWs.readyState < 2) gemWs.close();

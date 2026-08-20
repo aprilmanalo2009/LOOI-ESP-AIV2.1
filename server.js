@@ -320,10 +320,14 @@ app.post('/api/face/register', async (req, res) => {
 
 // ── WebSocket Server Setup for Phone & ESP32 ─────────────────
 const GEMINI_LIVE_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-2.0-flash-live-001';
+const GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-3.1-flash-live-preview';
+// Keep downstream PCM frames small for ESP32 WebSocketsClient variants.
+// Some firmware builds accept the connection but drop larger frames while
+// their audio callback is busy playing PCM.
 const ESP32_AUDIO_FRAME_BYTES = 2048;
 const MAX_QUEUED_UPSTREAM_BYTES = 512 * 1024;
 
+// CRITICAL FIX: perMessageDeflate=false para hindi mag-compress ang data papuntang ESP32
 const geminiLiveWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 const esp32LiveWss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
@@ -364,10 +368,11 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
 
   console.log(`[GeminiLive:${cid}] ➜ Client connected (${target}) from ${clientIp}`);
 
+  // Track connection
   const connSet = target === 'esp32' ? connections.esp32 : connections.gemini;
   connSet.add(cid);
 
-  // Ping client every 20s to keep Render proxy alive
+  // CRITICAL FIX: Ping every 20s para hindi i-disconnect ng Render proxy
   const pingInterval = setInterval(() => {
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.ping();
@@ -380,6 +385,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     try { 
       clientWs.send(JSON.stringify({ error: message })); 
     } catch {}
+    // Huwag agad i-close — hintayin 5s para mabasa ng ESP32
     setTimeout(() => {
       clearInterval(pingInterval);
       connSet.delete(cid);
@@ -400,10 +406,6 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   let inputStreamActive = false;
   let inputAudioFrames = 0;
   let outputAudioFrames = 0;
-  let lastAudioForwardLog = 0;
-  let geminiPingTimer = null;
-  let totalGeminiReconnects = 0;
-  const MAX_GEMINI_RECONNECTS = 10; // Prevent reconnect storms
 
   const sendClientJson = (message) => {
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -411,7 +413,14 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     }
   };
 
-  const ESP32_BYTES_PER_MS = 48;
+  // Downstream pacing for the ESP32. Firehosing an entire 9–14 KB Gemini
+  // chunk as back-to-back frames puts a burst on a weak/asymmetric uplink
+  // right when the device is also trying to push mic audio — that burst
+  // is exactly what shows up as choppy playback a moment later. Trickling
+  // frames out at roughly the real playback rate keeps a steadier stream
+  // and leaves the link some breathing room instead of bursting then
+  // starving.
+  const ESP32_BYTES_PER_MS = 48; // 24kHz * 16-bit mono PCM ≈ 48 bytes/ms
   const esp32OutQueue = [];
   let esp32PumpTimer = null;
 
@@ -424,7 +433,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   };
 
   const pumpEsp32Audio = () => {
-    if (esp32PumpTimer) return;
+    if (esp32PumpTimer) return; // pump already running
     const step = () => {
       if (clientWs.readyState !== WebSocket.OPEN || esp32OutQueue.length === 0) {
         esp32PumpTimer = null;
@@ -432,6 +441,8 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       }
       const frame = esp32OutQueue.shift();
       clientWs.send(frame);
+      // Pace slightly ahead of real-time so the device's own jitter buffer
+      // stays topped up rather than racing to catch up.
       const delayMs = Math.max(4, Math.round(frame.length / ESP32_BYTES_PER_MS) - 2);
       esp32PumpTimer = setTimeout(step, delayMs);
     };
@@ -447,6 +458,8 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
 
   const queueUpstream = (message) => {
     const messageBytes = Buffer.byteLength(message);
+    // Keep the newest audio and the end marker without allowing a long
+    // utterance to grow memory indefinitely while setup is in progress.
     while (audioQueue.length && audioQueueBytes + messageBytes > MAX_QUEUED_UPSTREAM_BYTES) {
       audioQueueBytes -= Buffer.byteLength(audioQueue.shift());
     }
@@ -462,164 +475,144 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     queueUpstream(message);
   };
 
-  const cleanupGemini = () => {
-    if (geminiPingTimer) {
-      clearInterval(geminiPingTimer);
-      geminiPingTimer = null;
-    }
-    if (geminiReconnectTimer) {
-      clearTimeout(geminiReconnectTimer);
-      geminiReconnectTimer = null;
-    }
-    if (gemWs && gemWs.readyState < 2) {
-      gemWs.close();
-    }
-    gemWs = null;
-    ready = false;
-  };
-
   const bindGeminiSocket = (socket) => {
     socket.on('open', () => {
-      console.log(`[GeminiLive:${cid}] Gemini WS opened (attempt ${geminiConnectAttempt + 1})`);
-
-      // CRITICAL FIX: Send ping to Gemini every 15s to prevent timeout
-      if (geminiPingTimer) clearInterval(geminiPingTimer);
-      geminiPingTimer = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.ping();
-        }
-      }, 15000);
-
-      const setupPayload = {
-        setup: {
-          model: GEMINI_LIVE_MODEL,
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
-              languageCode: 'fil-PH'
+    console.log(`[GeminiLive:${cid}] Gemini WS opened`);
+    geminiConnectAttempt = 0;
+    socket.send(JSON.stringify({
+      setup: {
+        model: GEMINI_LIVE_MODEL,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+            languageCode: 'fil-PH'
+          }
+        },
+        ...(target === 'esp32' ? {
+          realtimeInputConfig: {
+            automaticActivityDetection: {
+              disabled: false
             }
-          },
-          // Only add realtimeInputConfig for ESP32 (continuous audio mode)
-          ...(target === 'esp32' ? {
-            realtimeInputConfig: {
-              automaticActivityDetection: {
-                disabled: false,
-                startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
-                endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
-                prefixPaddingMs: 60,
-                silenceDurationMs: 400
-              }
-            }
-          } : {}),
-          tools: ROBOT_TOOLS,
-          systemInstruction: { parts: [{ text: GEMINI_LIVE_SYSTEM }] }
-        }
-      };
-
-      socket.send(JSON.stringify(setupPayload));
+          }
+        } : {}),
+        tools: ROBOT_TOOLS,
+        systemInstruction: { parts: [{ text: GEMINI_LIVE_SYSTEM }] }
+      }
+    }));
     });
 
     socket.on('message', (data) => {
-      const str = data.toString();
-      let msg;
-      try { msg = JSON.parse(str); } catch { return; }
+    const str = data.toString();
+    let msg;
+    try { msg = JSON.parse(str); } catch { return; }
 
-      if (msg.error) {
-        const errorText = typeof msg.error === 'string'
-          ? msg.error
-          : msg.error.message || JSON.stringify(msg.error);
-        console.error(`[GeminiLive:${cid}] Gemini protocol error: ${errorText}`);
-        sendClientJson({ error: errorText });
-        return;
+    if (msg.error) {
+      const errorText = typeof msg.error === 'string'
+        ? msg.error
+        : msg.error.message || JSON.stringify(msg.error);
+      console.error(`[GeminiLive:${cid}] Gemini protocol error: ${errorText}`);
+      sendClientJson({ error: errorText });
+      return;
+    }
+
+    if (msg.toolCall) {
+      const immediateResponses = [];
+      for (const fc of (msg.toolCall.functionCalls || [])) {
+        if (fc.name === 'run_scenario') {
+          const args = fc.args || {};
+
+          // CRITICAL FIX: Align format with ESP32 expectations
+          // ESP32 expects: {"robotAction": true, "move": "...", "led": "...", "speed": 128}
+          const robotPayload = {
+            robotAction: true,
+            move: (args.move || 'NONE').toUpperCase(),
+            led: (args.led || 'NONE').toUpperCase(),
+            speed: args.speed !== undefined ? args.speed : 128
+          };
+
+          console.log(`[GeminiLive:${cid}] Robot command → move:${robotPayload.move} led:${robotPayload.led} speed:${robotPayload.speed}`);
+
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify(robotPayload));
+          }
+          immediateResponses.push({ id: fc.id, name: fc.name, response: { output: 'executed' } });
+        }
       }
+      if (immediateResponses.length && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ toolResponse: { functionResponses: immediateResponses } }));
+      }
+      return;
+    }
 
-      if (msg.toolCall) {
-        const immediateResponses = [];
-        for (const fc of (msg.toolCall.functionCalls || [])) {
-          if (fc.name === 'run_scenario') {
-            const args = fc.args || {};
-            const robotPayload = {
-              robotAction: true,
-              move: (args.move || 'NONE').toUpperCase(),
-              led: (args.led || 'NONE').toUpperCase(),
-              speed: args.speed !== undefined ? args.speed : 128
-            };
-            console.log(`[GeminiLive:${cid}] Robot command → move:${robotPayload.move} led:${robotPayload.led} speed:${robotPayload.speed}`);
-            if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify(robotPayload));
+    if (msg.serverContent?.modelTurn?.parts) {
+      for (const part of msg.serverContent.modelTurn.parts) {
+        if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
+          const rawPcm = Buffer.from(part.inlineData.data, 'base64');
+          outputAudioFrames++;
+          if (clientWs.readyState === WebSocket.OPEN) {
+            if (target === 'esp32') {
+              // Keep binary frames small enough for ESP32 WebSockets/I2S buffers.
+              // Gemini can return 9–14 KB chunks, while the device consumes them
+              // incrementally; never make the firmware drop a complete response.
+              sendEsp32Audio(rawPcm);
+            } else {
+              // Web/phone client gets the JSON wrapper
+              clientWs.send(str);
             }
-            immediateResponses.push({ id: fc.id, name: fc.name, response: { output: 'executed' } });
           }
         }
-        if (immediateResponses.length && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ toolResponse: { functionResponses: immediateResponses } }));
-        }
-        return;
       }
+    }
 
-      if (msg.serverContent?.modelTurn?.parts) {
-        for (const part of msg.serverContent.modelTurn.parts) {
-          if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
-            const rawPcm = Buffer.from(part.inlineData.data, 'base64');
-            outputAudioFrames++;
-            if (clientWs.readyState === WebSocket.OPEN) {
-              if (target === 'esp32') {
-                sendEsp32Audio(rawPcm);
-              } else {
-                clientWs.send(str);
-              }
-            }
-          }
-        }
+    if (msg.serverContent?.interrupted === true) {
+      console.log(`[GeminiLive:${cid}] Gemini interrupted the current response`);
+      if (target === 'esp32') clearEsp32AudioQueue();
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(target === 'esp32' ? JSON.stringify({ interrupted: true }) : str);
       }
+    }
 
-      if (msg.serverContent?.interrupted === true) {
-        console.log(`[GeminiLive:${cid}] Gemini interrupted the current response`);
-        if (target === 'esp32') clearEsp32AudioQueue();
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(target === 'esp32' ? JSON.stringify({ interrupted: true }) : str);
-        }
+    // ESP32 receives audio as binary frames, so forward the turn boundary
+    // separately; otherwise it cannot leave playback mode or resume VAD.
+    // The browser tester receives the original JSON event so it can update
+    // its state after playback has finished.
+    if (msg.serverContent?.turnComplete === true) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(target === 'esp32' ? JSON.stringify({ turnComplete: true }) : str);
       }
+      console.log(`[GeminiLive:${cid}] Gemini turn complete (${outputAudioFrames} audio frame(s))`);
+      outputAudioFrames = 0;
+    }
 
-      if (msg.serverContent?.turnComplete === true) {
-        if (clientWs.readyState === WebSocket.OPEN) {
-          clientWs.send(target === 'esp32' ? JSON.stringify({ turnComplete: true }) : str);
-        }
-        console.log(`[GeminiLive:${cid}] Gemini turn complete (${outputAudioFrames} audio frame(s))`);
-        outputAudioFrames = 0;
+    if (msg.setupComplete !== undefined) {
+      ready = true;
+      console.log(`[GeminiLive:${cid}] Gemini setup complete (${GEMINI_LIVE_MODEL})`);
+      sendClientJson({
+        serverHello: { status: 'ready', target, model: GEMINI_LIVE_MODEL },
+        setupComplete: true,
+      });
+      for (const c of audioQueue) {
+        if (socket.readyState === WebSocket.OPEN) socket.send(c);
       }
-
-      if (msg.setupComplete !== undefined) {
-        ready = true;
-        geminiConnectAttempt = 0; // Reset on successful setup
-        totalGeminiReconnects = 0;
-        console.log(`[GeminiLive:${cid}] ✅ Gemini setup complete (${GEMINI_LIVE_MODEL})`);
-        sendClientJson({
-          serverHello: { status: 'ready', target, model: GEMINI_LIVE_MODEL },
-          setupComplete: true,
-        });
-        for (const c of audioQueue) {
-          if (socket.readyState === WebSocket.OPEN) socket.send(c);
-        }
-        audioQueue.length = 0;
-        audioQueueBytes = 0;
-      }
+      audioQueue.length = 0;
+      audioQueueBytes = 0;
+    }
     });
 
     socket.on('close', (code, reason) => {
       if (socket !== gemWs) return;
-
-      const reasonStr = String(reason || '');
-      console.log(`[GeminiLive:${cid}] ❌ Gemini disconnected: code=${code} reason="${reasonStr}"`);
-
-      cleanupGemini();
-
+      gemWs = null;
+      ready = false;
+      console.log(`[GeminiLive:${cid}] Gemini disconnected: ${code} ${reason || ''}`);
       if (clientClosing || clientWs.readyState !== WebSocket.OPEN) return;
 
-      // Check for auth failure
-      const authFailed = code === 1008 && /invalid authentication|authentication credentials|unauthorized|api key/i.test(reasonStr);
+      const closeReason = String(reason || '');
+      const authFailed = code === 1008 && /invalid authentication|authentication credentials|unauthorized|api key/i.test(closeReason);
       if (authFailed && apiKey) {
+        // Do not retry a permanently rejected key every second. Move to the
+        // next configured key so one stale secret cannot create a reconnect
+        // storm for every connected ESP32.
         markKeyUnavailable(apiKey, 'authentication failure');
         apiKey = getActiveKey();
         if (!apiKey) {
@@ -632,28 +625,13 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         console.log(`[GeminiLive:${cid}] Switching to next configured Gemini key`);
       }
 
-      // CRITICAL FIX: Max reconnect limit to prevent storms
-      totalGeminiReconnects++;
-      if (totalGeminiReconnects > MAX_GEMINI_RECONNECTS) {
-        console.error(`[GeminiLive:${cid}] ⛔ Max reconnects (${MAX_GEMINI_RECONNECTS}) reached. Giving up.`);
-        sendClientJson({ error: `Gemini disconnected ${MAX_GEMINI_RECONNECTS} times. Check API key or network.` });
-        setTimeout(() => {
-          if (!clientClosing && clientWs.readyState === WebSocket.OPEN) {
-            clientWs.close(1011, 'Max Gemini reconnects exceeded');
-          }
-        }, 5000);
-        return;
-      }
-
-      // Exponential backoff with jitter, capped at 30s
+      // Keep the device/browser socket alive while Gemini has a transient
+      // upstream failure. This prevents ESP32 reconnect storms on mobile
+      // hotspots and lets queued input continue after the next handshake.
+      const delay = Math.min(1000 * (2 ** Math.min(geminiConnectAttempt, 3)), 10000);
       geminiConnectAttempt++;
-      const baseDelay = Math.min(1000 * Math.pow(2, Math.min(geminiConnectAttempt, 5)), 30000);
-      const jitter = Math.floor(Math.random() * 1000);
-      const delay = baseDelay + jitter;
-
-      console.log(`[GeminiLive:${cid}] 🔄 Reconnecting to Gemini in ${delay}ms (attempt ${geminiConnectAttempt}, total ${totalGeminiReconnects})`);
       sendClientJson({ serverHello: { status: 'reconnecting', target, retryInMs: delay } });
-
+      clearTimeout(geminiReconnectTimer);
       geminiReconnectTimer = setTimeout(() => {
         geminiReconnectTimer = null;
         connectGemini();
@@ -661,14 +639,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     });
 
     socket.on('error', (err) => {
-      console.error(`[GeminiLive:${cid}] Gemini WS error:`, err.message);
-    });
-
-    // Handle Gemini pings
-    socket.on('ping', () => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.pong();
-      }
+      console.error(`[GeminiLive:${cid}] Gemini error:`, err.message);
     });
   };
 
@@ -694,12 +665,17 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
       try {
         const msg = JSON.parse(text);
 
+        // CRITICAL FIX: Filter ESP32 deviceHello — huwag i-forward sa Gemini
         if (msg.deviceHello) {
           console.log(`[GeminiLive:${cid}] Received deviceHello:`, msg.deviceHello);
+          // Optional: acknowledge
           try { clientWs.send(JSON.stringify({ serverHello: { status: 'ok' } })); } catch {}
           return;
         }
 
+        // Keepalive from the ESP32 must stay between the device and this
+        // proxy. Forwarding {"ping":1} to Gemini Live is not valid protocol
+        // input and can make Gemini close the upstream socket immediately.
         if (msg.ping !== undefined || msg.type === 'ping') {
           if (clientWs.readyState === WebSocket.OPEN) {
             clientWs.send(JSON.stringify({ pong: 1 }));
@@ -708,6 +684,10 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         }
 
         if (msg.event === 'start_stream') {
+          // start_stream/end_stream are bridge commands, not Gemini Live
+          // protocol messages. Forwarding start_stream makes Gemini close the
+          // session with "Unknown name event", which looked like a random
+          // no-response on the browser tester.
           inputStreamActive = true;
           inputAudioFrames = 0;
           if (target === 'esp32') {
@@ -718,6 +698,8 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
           return;
         }
         if (msg.event === 'end_stream' && target === 'esp32') {
+          // Do not send audioStreamEnd in continuous mode: it would force a
+          // turn boundary and bring back the unreliable local-VAD behavior.
           inputStreamActive = false;
           console.log(`[GeminiLive:${cid}] Legacy END_STREAM ignored — Gemini automatic activity detection is active`);
           return;
@@ -725,8 +707,12 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         if (msg.event === 'end_stream') {
           console.log(`[GeminiLive:${cid}] Browser END_STREAM received — sending audioStreamEnd after ${inputAudioFrames} frame(s)`);
           if (ready && gemWs?.readyState === WebSocket.OPEN) {
+            // For realtime audio input, Gemini expects audioStreamEnd. This
+            // closes the current microphone activity and starts generation.
             gemWs.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
           } else {
+            // Keep the end marker after queued audio. Without it, a short
+            // first utterance can remain open forever while setup completes.
             queueUpstream(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
             console.log(`[GeminiLive:${cid}] audioStreamEnd queued until Gemini setup completes`);
           }
@@ -734,27 +720,16 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         }
       } catch {}
 
+      // Forward other text messages to Gemini
       sendUpstreamOrQueue(text);
       return;
     }
 
-    // CRITICAL FIX: Use mediaChunks array format (correct Gemini Live API)
+    // Binary audio from client → wrap as realtimeInput → Gemini
     const pcmFrame = JSON.stringify({
-      realtimeInput: {
-        mediaChunks: [{
-          mimeType: 'audio/pcm;rate=16000',
-          data: Buffer.from(data).toString('base64')
-        }]
-      }
+      realtimeInput: { audio: { data: Buffer.from(data).toString('base64'), mimeType: 'audio/pcm;rate=16000' } }
     });
     inputAudioFrames++;
-
-    // Log audio forwarding occasionally
-    const now = Date.now();
-    if (now - lastAudioForwardLog > 5000) {
-      lastAudioForwardLog = now;
-      console.log(`[GeminiLive:${cid}] 📡 Forwarding audio to Gemini (${target}): ${data.length} bytes, total frames=${inputAudioFrames}`);
-    }
 
     sendUpstreamOrQueue(pcmFrame);
   });
@@ -763,9 +738,10 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     console.log(`[GeminiLive:${cid}] Client disconnected: ${code} ${reason || ''}`);
     clientClosing = true;
     clearInterval(pingInterval);
-    cleanupGemini();
+    clearTimeout(geminiReconnectTimer);
     clearEsp32AudioQueue();
     connSet.delete(cid);
+    if (gemWs && gemWs.readyState < 2) gemWs.close();
   });
 
   clientWs.on('error', (err) => {
@@ -773,13 +749,14 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   });
 
   clientWs.on('pong', () => {
-    // Client responded to our ping — connection is healthy
+    console.log(`[GeminiLive:${cid}] Client pong received`);
   });
 }
 
 geminiLiveWss.on('connection', (clientWs, request) => attachGeminiLive(clientWs, request, { target: 'web' }));
 esp32LiveWss.on('connection', (clientWs, request) => attachGeminiLive(clientWs, request, { target: 'esp32' }));
 
+// CRITICAL FIX: Detailed logging sa upgrade handler
 httpServer.on('upgrade', (request, socket, head) => {
   const clientIp = socket.remoteAddress || 'unknown';
   console.log(`[WS Upgrade] ➜ Request from ${clientIp}: ${request.url}`);

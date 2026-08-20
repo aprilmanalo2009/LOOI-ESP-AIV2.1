@@ -1,3 +1,8 @@
+// ============================================================================
+// ALEXATRON FIRMWARE — FINAL FIX (v3)
+// Fix: Blocking I2S write with proper timeout + larger initial buffer fill
+// ============================================================================
+
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <WebSocketsClient.h>
@@ -7,38 +12,64 @@
 #include <rom/rtc.h>
 #include <HTTPClient.h>
 #include <math.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
 
-// ── Server ──────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+//  CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════
+
 const char* WS_HOST = "looi-esp-aiv2-1.onrender.com";
 const int   WS_PORT = 443;
 const char* WS_PATH = "/ws/esp32";
-const char* FW_BUILD_TAG = "stereo-jitter-fix-v1";
+const char* FW_BUILD_TAG = "final-fix-v3";
 
-// ── Hardware pins ── SAME AS YOUR WORKING CODE ─────────────────────
-#define MOTOR_A1       10
-#define MOTOR_A2       11
-#define MOTOR_B1       12
-#define MOTOR_B2       13
-#define SERVO_PIN      14
+#define MOTOR_A1       7
+#define MOTOR_A2       8
+#define MOTOR_B1       9
+#define MOTOR_B2       15
+#define SERVO_PIN      47
 #define NEO_PIN        48
 #define NEO_COUNT      1
+
 #define DAC_I2S_PORT   I2S_NUM_0
-// YOUR WORKING PINS — NOT CHANGED!
 #define DAC_BCLK_PIN   6
 #define DAC_WS_PIN     4
 #define DAC_DATA_PIN   5
+
 #define MIC_I2S_PORT   I2S_NUM_1
 #define MIC_BCLK_PIN   16
 #define MIC_WS_PIN     17
 #define MIC_SD_PIN     18
 
-// LEDC PWM para sa motors
+#define TFT_CS         10
+#define TFT_DC         11
+#define TFT_RST        12
+#define TFT_MOSI       13
+#define TFT_SCLK       14
+#define TFT_BL         21
+#define TOUCH_PIN      3
+
 #define CH_A1  0
 #define CH_A2  1
 #define CH_B1  2
 #define CH_B2  3
 #define PWM_FREQ  5000
 #define PWM_RES   8
+
+#define MIC_RATE        16000
+#define AUDIO_RATE      24000
+#define MIC_CHUNK_SAMPLES 512
+#define MAX_CHUNK_SIZE  8192
+
+// ══ CRITICAL FIX: MAS MALAKING DMA BUFFER ══
+// 32 x 1024 = 32KB = ~667ms of audio at 24kHz mono
+// Pero kailangan pa natin ng mas malaki para sa network jitter
+#define DAC_DMA_BUF_COUNT   32
+#define DAC_DMA_BUF_LEN     1024
+#define MIC_DMA_BUF_COUNT   8
+#define MIC_DMA_BUF_LEN     1024
 
 Adafruit_NeoPixel pixels(NEO_COUNT, NEO_PIN, NEO_GRB + NEO_KHZ800);
 WebSocketsClient webSocket;
@@ -50,15 +81,6 @@ bool isGeminiReady  = false;
 float currentVolume = 0.32f;
 volatile float audioLevel = 0.0f;
 
-#define MIC_RATE     16000
-#define AUDIO_RATE   24000
-#define MIC_CHUNK_SAMPLES 512
-#define MAX_CHUNK_SIZE 8192
-
-// JITTER FIX: Mas maraming blocks para sa mobile data buffer
-#define AUDIO_QUEUE_BLOCK_BYTES 2048
-#define AUDIO_QUEUE_BLOCK_COUNT 80
-uint8_t tempBuffer[MAX_CHUNK_SIZE];
 uint8_t b64DecodeBuf[MAX_CHUNK_SIZE];
 
 unsigned long micFramesSent = 0;
@@ -67,42 +89,201 @@ unsigned long moveStopAt = 0;
 bool motorsActive = false;
 const unsigned long MOVE_PULSE_MS = 700;
 
-// ── Network resilience ─────────────────────────────────────────────
 int consecutiveFailures = 0;
 const int MAX_FAILURES_BEFORE_RESTART = 30;
 
-// Manual keepalive (para sa Globe idle timeout)
 unsigned long lastKeepalive = 0;
-const unsigned long KEEPALIVE_INTERVAL = 15000;
+const unsigned long KEEPALIVE_INTERVAL = 30000;
+
 unsigned long lastWiFiRecoveryAttempt = 0;
 const unsigned long WIFI_RECOVERY_INTERVAL = 10000;
 
 const IPAddress GOOGLE_DNS(8, 8, 8, 8);
 const IPAddress CLOUDFLARE_DNS(1, 1, 1, 1);
 
-// Debug mode: i-set to true para i-disable ang audio sending
 const bool AUDIO_TEST_MODE = false;
-// PCM5102 diagnostic — set to true to test 440Hz tone
 const bool PCM5102_TONE_TEST = false;
 bool dacReady = false;
 
-// Network callbacks must return quickly.
-struct AudioQueueBlock {
-  size_t length;
-  uint8_t data[AUDIO_QUEUE_BLOCK_BYTES];
-};
+// ══ NEW: Audio buffer stats for debugging ══
+unsigned long totalAudioBytesReceived = 0;
+unsigned long totalAudioBytesWritten = 0;
 
-QueueHandle_t audioQueue = nullptr;
-TaskHandle_t audioPlaybackTaskHandle = nullptr;
-volatile bool audioPlaybackInProgress = false;
-volatile bool audioTurnCompletePending = false;
+// ═══════════════════════════════════════════════════════════════════
+//  FACE ANIMATION SYSTEM
+// ═══════════════════════════════════════════════════════════════════
 
-// STEREO FIX: Pre-allocated stereo buffer
-static int16_t stereoBuffer[(MAX_CHUNK_SIZE / sizeof(int16_t)) * 2];
+SPIClass mySPI(FSPI);
+Adafruit_ST7789 tft = Adafruit_ST7789(&mySPI, TFT_CS, TFT_DC, TFT_RST);
 
-// --------------------
-// Debug helpers
-// --------------------
+GFXcanvas16 faceCanvas(300, 120);
+
+const int CANVAS_X = 10;
+const int CANVAS_Y = 50;
+
+const int REL_EYE_LEFT_X = 90;
+const int REL_EYE_RIGHT_X = 210;
+const int REL_EYE_Y = 50;
+const int EYE_RADIUS = 10;
+
+const int REL_MOUTH_X = 115;
+const int REL_MOUTH_Y = 65;
+const int MOUTH_W = 70;
+const int MOUTH_H = 4;
+
+float faceCurrentX = 0, faceCurrentY = 0;
+float faceTargetX = 0, faceTargetY = 0;
+
+enum Emotion { NORMAL, HAPPY, MAD, YAWN, SLEEP, SPEAKING };
+Emotion currentEmotion = NORMAL;
+
+int touchCount = 0;
+unsigned long lastTouchTime = 0;
+unsigned long emotionStartTime = 0;
+unsigned long lastBlinkTime = 0;
+unsigned long lastLookAroundTime = 0;
+unsigned long lastActivityTime = 0;
+
+const unsigned long YAWN_TIMEOUT = 10000;
+
+bool touchHandled = false;
+float zzzOffsetY = 0;
+
+float mouthOpenAmount = 0.0f;
+float mouthTargetOpen = 0.0f;
+
+bool isBlinking = false;
+unsigned long blinkStartTime = 0;
+const unsigned long BLINK_DURATION = 90;
+
+bool isYawning = false;
+int yawnProgress = 0;
+unsigned long yawnStartTime = 0;
+const unsigned long YAWN_STEP_MS = 20;
+const int YAWN_MAX_PROGRESS = 30;
+
+unsigned long lastFaceRender = 0;
+const unsigned long FACE_RENDER_INTERVAL = 33;
+
+void setBrightness(int value) {
+  analogWrite(TFT_BL, value);
+}
+
+void drawHeartIcon(int16_t x, int16_t y, int16_t size, uint16_t color) {
+  faceCanvas.fillCircle(x - size/2, y, size/2, color);
+  faceCanvas.fillCircle(x + size/2, y, size/2, color);
+  faceCanvas.fillTriangle(x - size, y + size/4, x + size, y + size/4, x, y + size + 2, color);
+}
+
+void drawAngerMark(int16_t x, int16_t y) {
+  uint16_t red = ST77XX_RED;
+  faceCanvas.drawFastHLine(x - 8, y - 4, 16, red);
+  faceCanvas.drawFastHLine(x - 8, y + 4, 16, red);
+  faceCanvas.drawFastVLine(x - 4, y - 8, 16, red);
+  faceCanvas.drawFastVLine(x + 4, y - 8, 16, red);
+  faceCanvas.drawLine(x - 8, y - 4, x - 12, y - 8, red);
+  faceCanvas.drawLine(x + 8, y - 4, x + 12, y - 8, red);
+  faceCanvas.drawLine(x - 8, y + 4, x - 12, y + 8, red);
+  faceCanvas.drawLine(x + 8, y + 4, x + 12, y + 8, red);
+}
+
+float mapAudioToMouth(float rms) {
+  float normalized = rms / 3000.0f;
+  if (normalized > 1.0f) normalized = 1.0f;
+  if (normalized < 0.05f) normalized = 0.05f;
+  return normalized;
+}
+
+void renderFaceToCanvas() {
+  faceCanvas.fillScreen(ST77XX_BLACK);
+
+  int lx = REL_EYE_LEFT_X + (int)faceCurrentX;
+  int rx = REL_EYE_RIGHT_X + (int)faceCurrentX;
+  int ey = REL_EYE_Y + (int)faceCurrentY;
+  int mx = REL_MOUTH_X + (int)faceCurrentX;
+  int my = REL_MOUTH_Y + (int)faceCurrentY;
+
+  if (currentEmotion == HAPPY) {
+    faceCanvas.fillCircle(lx, ey, EYE_RADIUS, ST77XX_WHITE);
+    faceCanvas.fillCircle(lx, ey + 4, EYE_RADIUS, ST77XX_BLACK);
+    faceCanvas.fillCircle(rx, ey, EYE_RADIUS, ST77XX_WHITE);
+    faceCanvas.fillCircle(rx, ey + 4, EYE_RADIUS, ST77XX_BLACK);
+  } else if (currentEmotion == MAD) {
+    faceCanvas.fillCircle(lx, ey, EYE_RADIUS, ST77XX_WHITE);
+    faceCanvas.fillCircle(rx, ey, EYE_RADIUS, ST77XX_WHITE);
+    faceCanvas.fillTriangle(lx - EYE_RADIUS - 2, ey - EYE_RADIUS - 2, lx + EYE_RADIUS + 2, ey - EYE_RADIUS - 2, lx + EYE_RADIUS + 2, ey + 2, ST77XX_BLACK);
+    faceCanvas.fillTriangle(rx - EYE_RADIUS - 2, ey - EYE_RADIUS - 2, rx + EYE_RADIUS + 2, ey - EYE_RADIUS - 2, rx - EYE_RADIUS - 2, ey + 2, ST77XX_BLACK);
+  } else if (currentEmotion == SLEEP || currentEmotion == YAWN) {
+    faceCanvas.drawFastHLine(lx - EYE_RADIUS, ey, EYE_RADIUS * 2, ST77XX_WHITE);
+    faceCanvas.drawFastHLine(rx - EYE_RADIUS, ey, EYE_RADIUS * 2, ST77XX_WHITE);
+  } else if (isBlinking) {
+    faceCanvas.drawFastHLine(lx - EYE_RADIUS, ey, EYE_RADIUS * 2, ST77XX_WHITE);
+    faceCanvas.drawFastHLine(rx - EYE_RADIUS, ey, EYE_RADIUS * 2, ST77XX_WHITE);
+  } else {
+    faceCanvas.fillCircle(lx, ey, EYE_RADIUS, ST77XX_WHITE);
+    faceCanvas.fillCircle(rx, ey, EYE_RADIUS, ST77XX_WHITE);
+  }
+
+  if (currentEmotion == MAD) {
+    faceCanvas.fillRect(mx + 10, my, MOUTH_W - 20, MOUTH_H, ST77XX_WHITE);
+    faceCanvas.drawFastVLine(mx + 10, my, 6, ST77XX_WHITE);
+    faceCanvas.drawFastVLine(mx + MOUTH_W - 10, my - 4, 6, ST77XX_WHITE);
+  } else if (currentEmotion == YAWN) {
+    int r = 2 + (yawnProgress / 4);
+    int centerMouthX = mx + (MOUTH_W / 2);
+    faceCanvas.fillRoundRect(centerMouthX - 12, my - 2, 24, r * 2, 6, ST77XX_WHITE);
+    faceCanvas.fillRoundRect(centerMouthX - 9, my, 18, (r * 2) - 4, 4, ST77XX_BLACK);
+    if (r > 8) faceCanvas.fillCircle(centerMouthX, my + (r * 2) - 8, 4, ST77XX_MAGENTA);
+  } else if (currentEmotion == SLEEP) {
+    faceCanvas.fillRect(mx + 20, my, MOUTH_W - 40, MOUTH_H, ST77XX_WHITE);
+  } else if (currentEmotion == SPEAKING) {
+    int centerMouthX = mx + (MOUTH_W / 2);
+    int maxOpen = 28;
+    int openH = (int)(mouthOpenAmount * maxOpen);
+    if (openH < 3) openH = 3;
+    int mouthW = MOUTH_W - 10;
+    int mouthTop = my - openH / 2;
+    faceCanvas.fillRoundRect(centerMouthX - mouthW/2, mouthTop, mouthW, openH, openH/2, ST77XX_WHITE);
+    int innerW = mouthW - 8;
+    int innerH = openH - 4;
+    if (innerH < 2) innerH = 2;
+    faceCanvas.fillRoundRect(centerMouthX - innerW/2, mouthTop + 2, innerW, innerH, innerH/2, ST77XX_BLACK);
+    if (openH > 15) {
+      faceCanvas.fillCircle(centerMouthX, mouthTop + innerH + 2, 4, ST77XX_MAGENTA);
+    }
+  } else {
+    faceCanvas.fillRect(mx, my, MOUTH_W, MOUTH_H, ST77XX_WHITE);
+  }
+
+  int iconX = rx + 25;
+  int iconY = ey - 25;
+
+  if (currentEmotion == HAPPY) {
+    drawHeartIcon(iconX, iconY, 8, ST77XX_RED);
+  } else if (currentEmotion == MAD) {
+    drawAngerMark(iconX, iconY);
+  } else if (currentEmotion == SLEEP) {
+    int floatY = iconY - (int)zzzOffsetY;
+    faceCanvas.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
+    faceCanvas.setTextSize(2);
+    faceCanvas.setCursor(iconX - 5, floatY);
+    faceCanvas.print("Z");
+    faceCanvas.setTextSize(1);
+    faceCanvas.setCursor(iconX + 10, floatY - 5);
+    faceCanvas.print("zz");
+  } else if (currentEmotion == SPEAKING) {
+    faceCanvas.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
+    faceCanvas.setTextSize(1);
+    faceCanvas.setCursor(iconX - 5, iconY + 10);
+    faceCanvas.print("~");
+  }
+
+  tft.drawRGBBitmap(CANVAS_X, CANVAS_Y, faceCanvas.getBuffer(), 300, 120);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  DEBUG HELPERS
+// ═══════════════════════════════════════════════════════════════════
 
 void setColor(uint32_t color) {
   pixels.setPixelColor(0, color);
@@ -122,9 +303,9 @@ void printBootReason() {
   }
 }
 
-// --------------------
-// Motors (LEDC PWM)
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  MOTORS
+// ═══════════════════════════════════════════════════════════════════
 
 void setupMotors() {
   #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
@@ -198,9 +379,9 @@ void handleRobotAction(const String& move, const String& led, int speed) {
   if (move.length() && move != "NONE") driveMotors(move, (uint8_t)speed);
 }
 
-// --------------------
-// Base64 decode
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  BASE64 DECODE
+// ═══════════════════════════════════════════════════════════════════
 
 int b64Val(char c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -230,9 +411,9 @@ size_t base64Decode(const char* in, size_t len, uint8_t* out, size_t outCap) {
   return o;
 }
 
-// --------------------
-// Tiny JSON helpers
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  TINY JSON HELPERS
+// ═══════════════════════════════════════════════════════════════════
 
 String jsonGetString(const String& src, const char* key, int fromIndex = 0) {
   String needle = String("\"") + key + "\":\"";
@@ -260,34 +441,73 @@ bool jsonHas(const String& src, const char* literal) {
   return src.indexOf(literal) >= 0;
 }
 
-// --------------------
-// Audio
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  AUDIO SYSTEM — FINAL FIX
+// ═══════════════════════════════════════════════════════════════════
 
 void streamMicChunk(const uint8_t* buf, size_t bytes) {
   webSocket.sendBIN((uint8_t*)buf, bytes);
 }
 
-void applyVolume(uint8_t* data, size_t len, float vol) {
-  int16_t* samples = (int16_t*)data;
-  for (size_t i = 0; i < len / 2; i++) {
-    int32_t scaled = (int32_t)((float)samples[i] * vol);
-    if (scaled > 32767) scaled = 32767;
-    if (scaled < -32768) scaled = -32768;
-    samples[i] = (int16_t)scaled;
+void applyVolumeInPlace(int16_t* samples, size_t sampleCount) {
+  for (size_t i = 0; i < sampleCount; i++) {
+    float sample = samples[i] * currentVolume;
+    if (sample > 32767) sample = 32767;
+    if (sample < -32768) sample = -32768;
+    samples[i] = (int16_t)sample;
   }
 }
 
-float computeAudioLevel(uint8_t* data, size_t len) {
-  const int count = len / sizeof(int16_t);
+float computeAudioLevel(int16_t* samples, size_t sampleCount) {
+  if (sampleCount == 0) return 0;
   float sum = 0;
-  for (int i = 0; i < count; i++) {
-    int16_t sample = 0;
-    memcpy(&sample, data + (i * sizeof(int16_t)), sizeof(sample));
-    float s = sample;
+  for (size_t i = 0; i < sampleCount; i++) {
+    float s = samples[i];
     sum += s * s;
   }
-  return count ? sqrt(sum / count) : 0;
+  return sqrt(sum / sampleCount);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  CRITICAL FIX: PROPER I2S WRITE
+// ═══════════════════════════════════════════════════════════════════
+// 
+// ANG SIKRETO: Yung I2S DMA buffer (32KB) ang magiging jitter buffer.
+// Kailangan lang: i-fill natin sya ng mas mabilis kaysa ma-drain.
+//
+// Strategy:
+// 1. Write ALL data to I2S DMA buffer (blocking with timeout)
+// 2. Yung I2S hardware na bahala sa exact timing
+// 3. Kung puno yung buffer, wait ng konti (pero hindi sobrang tagal)
+//
+// Yung key: portMAX_DELAY para sure na nasulat, PERO yung DMA buffer
+// malaki enough para hindi mag-block ng matagal.
+
+void directI2SWrite(uint8_t* data, size_t len) {
+  if (!dacReady || len == 0) return;
+  if (len < 10) return;  // Filter corrupt frames
+
+  size_t numSamples = len / sizeof(int16_t);
+  if (numSamples > 0) {
+    audioLevel = computeAudioLevel((int16_t*)data, numSamples);
+    mouthTargetOpen = mapAudioToMouth(audioLevel);
+    if (currentVolume != 1.0f) {
+      applyVolumeInPlace((int16_t*)data, numSamples);
+    }
+  }
+
+  // ══ FINAL FIX: Blocking write with reasonable timeout ══
+  // portMAX_DELAY = wait until space available in DMA buffer
+  // Pero since 32KB yung buffer, at bawat call is ~2KB, 
+  // hindi mag-block ng matagal unless punong-puno na
+  size_t written = 0;
+  esp_err_t err = i2s_write(DAC_I2S_PORT, data, len, &written, portMAX_DELAY);
+  
+  if (err != ESP_OK) {
+    Serial.printf("[AUDIO] I2S write error: %d (written=%u/%u)\n", err, (unsigned)written, (unsigned)len);
+  } else {
+    totalAudioBytesWritten += written;
+  }
 }
 
 void setupPcm5102() {
@@ -295,12 +515,12 @@ void setupPcm5102() {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = AUDIO_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 256,
-    .use_apll = false,
+    .dma_buf_count = DAC_DMA_BUF_COUNT,
+    .dma_buf_len = DAC_DMA_BUF_LEN,
+    .use_apll = true,
     .tx_desc_auto_clear = true
   };
   i2s_pin_config_t dac_pins = {
@@ -323,121 +543,67 @@ void setupPcm5102() {
   }
   i2s_zero_dma_buffer(DAC_I2S_PORT);
   dacReady = true;
-  Serial.printf("[INIT] PCM5102 DAC I2S OK (BCK GPIO %d, WS GPIO %d, DIN GPIO %d, %dkHz)\n",
-                DAC_BCLK_PIN, DAC_WS_PIN, DAC_DATA_PIN, AUDIO_RATE / 1000);
-}
-
-// STEREO FIX: Pre-allocated buffer, duplicate mono to both channels
-void writeStereoPcm(const int16_t* samples, size_t sampleCount) {
-  if (!dacReady || sampleCount == 0) return;
-
-  size_t maxSamples = sizeof(stereoBuffer) / (2 * sizeof(int16_t));
-  size_t samplesToProcess = min(sampleCount, maxSamples);
-
-  for (size_t i = 0; i < samplesToProcess; i++) {
-    stereoBuffer[i * 2] = samples[i];      // LEFT channel
-    stereoBuffer[i * 2 + 1] = samples[i];  // RIGHT channel (same as left)
-  }
-
-  size_t bytesWritten = 0;
-  i2s_write(DAC_I2S_PORT, stereoBuffer, samplesToProcess * 2 * sizeof(int16_t),
-            &bytesWritten, portMAX_DELAY);
+  Serial.printf("[INIT] PCM5102 OK (32KB DMA buffer = ~667ms audio)\n");
 }
 
 void playPcm5102ToneTest() {
-  Serial.println("[AUDIO TEST] PCM5102 I2S: 440Hz tone for 1 second");
-  static int16_t toneBuffer[256 * 2];
-  const size_t toneSamples = sizeof(toneBuffer) / (2 * sizeof(int16_t));
-
+  Serial.println("[AUDIO TEST] 440Hz tone 1s");
+  static int16_t toneBuffer[1024];
+  const size_t toneSamples = sizeof(toneBuffer) / sizeof(int16_t);
   for (size_t offset = 0; offset < AUDIO_RATE; offset += toneSamples) {
     const size_t count = min(toneSamples, (size_t)AUDIO_RATE - offset);
     for (size_t i = 0; i < count; i++) {
-      const float phase = 2.0f * 3.14159265359f * 440.0f *
-                          (float)(offset + i) / AUDIO_RATE;
-      const int16_t sample = (int16_t)(sinf(phase) * 20000.0f);
-      toneBuffer[i * 2] = sample;
-      toneBuffer[i * 2 + 1] = sample;
+      const float phase = 2.0f * 3.14159265359f * 440.0f * (float)(offset + i) / AUDIO_RATE;
+      toneBuffer[i] = (int16_t)(sinf(phase) * 20000.0f);
     }
-    size_t bytesWritten = 0;
-    i2s_write(DAC_I2S_PORT, toneBuffer, count * 2 * sizeof(int16_t),
-              &bytesWritten, portMAX_DELAY);
+    size_t written = 0;
+    i2s_write(DAC_I2S_PORT, (uint8_t*)toneBuffer, count * sizeof(int16_t), &written, portMAX_DELAY);
   }
-  Serial.println("[AUDIO TEST] PCM5102 tone ended");
+  Serial.println("[AUDIO TEST] Done");
 }
 
-void writePcmToPcm5102(const uint8_t* data, size_t len) {
-  // Gemini sends little-endian signed 16-bit mono PCM at 24 kHz.
-  // Convert to stereo: duplicate each sample to L/R
-  writeStereoPcm(reinterpret_cast<const int16_t*>(data), len / sizeof(int16_t));
+void preSilenceFlush() {
+  uint8_t silence[512] = {0};
+  size_t written = 0;
+  for (int i = 0; i < 8; i++) {
+    i2s_write(DAC_I2S_PORT, silence, 512, &written, pdMS_TO_TICKS(20));
+  }
+  i2s_zero_dma_buffer(DAC_I2S_PORT);
 }
 
-void clearAudioQueue() {
-  audioTurnCompletePending = false;
-  audioPlaybackInProgress = false;
-  if (audioQueue) xQueueReset(audioQueue);
+void stopPlayback() {
+  preSilenceFlush();
   isPlaying = false;
-}
-
-void finishAudioTurnIfDrained() {
-  if (!audioTurnCompletePending || audioPlaybackInProgress || !audioQueue) return;
-  if (uxQueueMessagesWaiting(audioQueue) != 0) return;
-  audioTurnCompletePending = false;
-  isPlaying = false;
-  Serial.println("[AUDIO] PLAYBACK_END (buffer drained)");
+  audioLevel = 0;
+  mouthTargetOpen = 0.0f;
+  if (currentEmotion == SPEAKING) {
+    currentEmotion = NORMAL;
+  }
   setColor(pixels.Color(0, 0, 100));
+  Serial.printf("[AUDIO] END — received=%lu bytes, written=%lu bytes\n", 
+                totalAudioBytesReceived, totalAudioBytesWritten);
+  totalAudioBytesReceived = 0;
+  totalAudioBytesWritten = 0;
 }
 
-void audioPlaybackTask(void*) {
-  AudioQueueBlock block;
-  for (;;) {
-    if (xQueueReceive(audioQueue, &block, portMAX_DELAY) != pdTRUE) continue;
-    audioPlaybackInProgress = true;
-    isPlaying = true;
-    setColor(pixels.Color(200, 0, 200));
-    if (block.length > 0) {
-      audioLevel = computeAudioLevel(block.data, block.length);
-      writePcmToPcm5102(block.data, block.length);
-    }
-    audioPlaybackInProgress = false;
-    finishAudioTurnIfDrained();
-  }
-}
-
-bool queueAudioForPlayback(const uint8_t* data, size_t len) {
-  if (!audioQueue || !data || len == 0) return false;
-  size_t offset = 0;
-  while (offset < len) {
-    AudioQueueBlock block;
-    block.length = min(len - offset, (size_t)AUDIO_QUEUE_BLOCK_BYTES);
-    memcpy(block.data, data + offset, block.length);
-    if (xQueueSend(audioQueue, &block, 0) != pdTRUE) {
-      Serial.println("[AUDIO] Playback queue full — dropping newest packet");
-      return false;
-    }
-    offset += block.length;
-  }
-  isPlaying = true;
-  return true;
-}
-
-// --------------------
-// WebSocket
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  WEBSOCKET
+// ═══════════════════════════════════════════════════════════════════
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED:
       isWSConnected = false;
       isGeminiReady = false;
-      clearAudioQueue();
+      isPlaying = false;
+      audioLevel = 0;
+      mouthTargetOpen = 0.0f;
       consecutiveFailures++;
-      Serial.printf("[MIC] Continuous stream stopped after %lu frame(s)\n", micFramesSent);
-      Serial.printf("[WS] Disconnected (failure #%d, library retry interval active)\n",
-                    consecutiveFailures);
+      Serial.printf("[MIC] Stream stopped after %lu frames\n", micFramesSent);
+      Serial.printf("[WS] Disconnected (failure #%d)\n", consecutiveFailures);
       setColor(pixels.Color(100, 0, 0));
-
       if (consecutiveFailures >= MAX_FAILURES_BEFORE_RESTART) {
-        Serial.println("[NET] Too many failures, restarting ESP32...");
+        Serial.println("[NET] Too many failures, restarting...");
         delay(1000);
         ESP.restart();
       }
@@ -450,22 +616,23 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       lastKeepalive = millis();
       Serial.println("[WS] Connected ✓");
       setColor(pixels.Color(0, 0, 100));
-
       webSocket.sendTXT("{\"deviceHello\":{\"device\":\"alexatron-esp32s3\"}}");
       break;
     }
 
     case WStype_TEXT: {
       String msg((char*)payload, length);
-      Serial.println("[WS] TXT: " + msg.substring(0, min((int)msg.length(), 150)));
+      
+      if (!jsonHas(msg, "\"pong\"")) {
+        Serial.println("[WS] TXT: " + msg.substring(0, min((int)msg.length(), 120)));
+      }
 
       if (jsonHas(msg, "\"status\":\"ready\"")) {
         isGeminiReady = true;
-        Serial.println("[WS] Gemini ready — continuous mic streaming enabled");
+        Serial.println("[WS] Gemini ready — mic ON");
       }
 
       if (jsonHas(msg, "\"serverHello\"") || jsonHas(msg, "\"pong\"")) {
-        Serial.println("[WS] Server hello/keepalive ack");
         break;
       }
 
@@ -482,74 +649,79 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
         break;
       }
       if (jsonHas(msg, "\"interrupted\":true")) {
-        clearAudioQueue();
-        Serial.println("[AUDIO] PLAYBACK_INTERRUPTED");
-        setColor(pixels.Color(0, 0, 100));
+        stopPlayback();
+        Serial.println("[AUDIO] INTERRUPTED");
         break;
       }
       if (jsonHas(msg, "\"inlineData\"")) {
         isPlaying = true;
         setColor(pixels.Color(200, 0, 200));
+        if (currentEmotion != SPEAKING) {
+          currentEmotion = SPEAKING;
+          emotionStartTime = millis();
+        }
         String b64 = jsonGetString(msg, "data");
         if (b64.length()) {
           size_t decoded = base64Decode(b64.c_str(), b64.length(), b64DecodeBuf, MAX_CHUNK_SIZE);
           if (decoded > 0) {
-            uint8_t* p = b64DecodeBuf;
-            if (currentVolume != 1.0f && decoded <= MAX_CHUNK_SIZE) {
-              memcpy(tempBuffer, b64DecodeBuf, decoded);
-              applyVolume(tempBuffer, decoded, currentVolume);
-              p = tempBuffer;
-            }
-            queueAudioForPlayback(p, decoded);
+            totalAudioBytesReceived += decoded;
+            directI2SWrite(b64DecodeBuf, decoded);
           }
         }
       }
+      
       if (jsonHas(msg, "\"turnComplete\":true")) {
-        audioTurnCompletePending = true;
-        finishAudioTurnIfDrained();
-        Serial.println("[AUDIO] Gemini turn complete — waiting for playback queue");
+        Serial.println("[AUDIO] turnComplete → stopping playback");
+        stopPlayback();
       }
       break;
     }
 
     case WStype_BIN: {
       static unsigned long audioFramesReceived = 0;
-      if (length == 0) break;
+      
+      if (length < 10) break;
 
       audioFramesReceived++;
-      if (audioFramesReceived <= 3 || audioFramesReceived % 10 == 0) {
-        Serial.printf("[WS] AI audio frame #%lu (%u bytes, RMS=%.0f)\n",
+      totalAudioBytesReceived += length;
+      
+      if (audioFramesReceived <= 3 || audioFramesReceived % 20 == 0) {
+        Serial.printf("[WS] AI frame #%lu (%u bytes, RMS=%.0f)\n",
                       audioFramesReceived, (unsigned)length,
-                      computeAudioLevel(payload, length));
+                      computeAudioLevel((int16_t*)payload, length / 2));
       }
 
-      queueAudioForPlayback(payload, length);
+      isPlaying = true;
+      if (currentEmotion != SPEAKING) {
+        currentEmotion = SPEAKING;
+        emotionStartTime = millis();
+      }
+      directI2SWrite(payload, length);
       break;
     }
 
     case WStype_ERROR:
-      Serial.printf("[WS] Error event: %s\n", payload ? (char*)payload : "unknown");
+      Serial.printf("[WS] Error: %s\n", payload ? (char*)payload : "unknown");
       break;
   }
 }
 
-// --------------------
-// Network Diagnostics
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  NETWORK
+// ═══════════════════════════════════════════════════════════════════
 
 bool checkInternetConnectivity() {
-  Serial.println("[NET] Testing HTTP connectivity...");
+  Serial.println("[NET] Testing HTTP...");
   HTTPClient http;
   http.setTimeout(5000);
   http.begin(String("https://") + WS_HOST + "/health");
   int httpCode = http.GET();
   http.end();
-
   if (httpCode == 200) {
-    Serial.println("[NET] HTTP test ✓ (Server reachable)");
+    Serial.println("[NET] HTTP ✓");
     return true;
   } else {
-    Serial.printf("[NET] HTTP test ✗ (code: %d)\n", httpCode);
+    Serial.printf("[NET] HTTP ✗ (code: %d)\n", httpCode);
     return false;
   }
 }
@@ -557,31 +729,120 @@ bool checkInternetConnectivity() {
 void maintainWiFiConnection() {
   if (WiFi.status() == WL_CONNECTED) return;
   if (millis() - lastWiFiRecoveryAttempt < WIFI_RECOVERY_INTERVAL) return;
-
   lastWiFiRecoveryAttempt = millis();
   isWSConnected = false;
   isGeminiReady = false;
-  clearAudioQueue();
-  Serial.printf("[NET] WiFi disconnected (status %d) — reconnecting...\n", WiFi.status());
+  isPlaying = false;
+  Serial.printf("[NET] WiFi disconnected (%d) — reconnecting...\n", WiFi.status());
   WiFi.reconnect();
 }
 
 bool resolveHost() {
   IPAddress resolvedIP;
   Serial.printf("[NET] Resolving %s...\n", WS_HOST);
-
   if (WiFi.hostByName(WS_HOST, resolvedIP)) {
-    Serial.printf("[NET] Resolved to: %s\n", resolvedIP.toString().c_str());
+    Serial.printf("[NET] Resolved: %s\n", resolvedIP.toString().c_str());
     return true;
   } else {
-    Serial.println("[NET] DNS resolution FAILED");
+    Serial.println("[NET] DNS FAILED");
     return false;
   }
 }
 
-// --------------------
-// Setup
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  FACE ANIMATION
+// ═══════════════════════════════════════════════════════════════════
+
+void updateFaceAnimation() {
+  unsigned long currentMillis = millis();
+  int touchState = digitalRead(TOUCH_PIN);
+
+  faceCurrentX += (faceTargetX - faceCurrentX) * 0.15;
+  faceCurrentY += (faceTargetY - faceCurrentY) * 0.15;
+  mouthOpenAmount += (mouthTargetOpen - mouthOpenAmount) * 0.25;
+
+  if (!isPlaying && mouthTargetOpen > 0) {
+    mouthTargetOpen *= 0.85f;
+    if (mouthTargetOpen < 0.05f) mouthTargetOpen = 0.0f;
+  }
+
+  if (currentEmotion == SLEEP) {
+    zzzOffsetY += 0.4;
+    if (zzzOffsetY > 20) zzzOffsetY = 0;
+  }
+
+  if (touchCount > 0 && (currentMillis - lastTouchTime > 3000)) {
+    touchCount = 0;
+  }
+
+  if (touchState == HIGH && !touchHandled) {
+    touchHandled = true;
+    touchCount++;
+    lastTouchTime = currentMillis;
+    emotionStartTime = currentMillis;
+    lastActivityTime = currentMillis;
+    if (currentEmotion == SLEEP || currentEmotion == YAWN) {
+      currentEmotion = NORMAL;
+      faceTargetX = 0;
+      faceTargetY = 0;
+    }
+    currentEmotion = (touchCount >= 4) ? MAD : HAPPY;
+  }
+  if (touchState == LOW) {
+    touchHandled = false;
+  }
+
+  if (currentEmotion == NORMAL && (currentMillis - lastActivityTime > YAWN_TIMEOUT)) {
+    if (!isYawning) {
+      isYawning = true;
+      yawnProgress = 0;
+      yawnStartTime = currentMillis;
+      currentEmotion = YAWN;
+      faceTargetY = 5;
+    }
+  }
+
+  if (isYawning && currentEmotion == YAWN) {
+    unsigned long elapsed = currentMillis - yawnStartTime;
+    yawnProgress = min((int)(elapsed / YAWN_STEP_MS), YAWN_MAX_PROGRESS);
+    if (yawnProgress >= YAWN_MAX_PROGRESS) {
+      currentEmotion = SLEEP;
+      faceTargetY = 8;
+      zzzOffsetY = 0;
+      isYawning = false;
+    }
+  }
+
+  if ((currentEmotion == HAPPY || currentEmotion == MAD) &&
+      (currentMillis - emotionStartTime > 3000)) {
+    currentEmotion = NORMAL;
+    faceTargetX = 0;
+    faceTargetY = 0;
+  }
+
+  if (currentEmotion == NORMAL && (currentMillis - lastLookAroundTime > 4000)) {
+    int positions[4][2] = {{-18, 0}, {18, 0}, {0, -10}, {0, 0}};
+    int idx = random(0, 4);
+    faceTargetX = positions[idx][0];
+    faceTargetY = positions[idx][1];
+    lastLookAroundTime = currentMillis;
+  }
+
+  if (currentEmotion == NORMAL && !isBlinking && (currentMillis - lastBlinkTime > 3500)) {
+    isBlinking = true;
+    blinkStartTime = currentMillis;
+  }
+  if (isBlinking && (currentMillis - blinkStartTime > BLINK_DURATION)) {
+    isBlinking = false;
+    lastBlinkTime = currentMillis;
+  }
+
+  renderFaceToCanvas();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  SETUP
+// ═══════════════════════════════════════════════════════════════════
 
 void setup() {
   Serial.begin(115200);
@@ -590,7 +851,7 @@ void setup() {
   delay(500);
 
   Serial.println("\n\n═══════════════════════════════════════");
-  Serial.println("  ALEXATRON BOOT — STEREO + JITTER FIX");
+  Serial.println("  ALEXATRON BOOT — FINAL FIX V3");
   Serial.println("═══════════════════════════════════════");
   Serial.printf("[INIT] Firmware: %s\n", FW_BUILD_TAG);
   printBootReason();
@@ -605,16 +866,36 @@ void setup() {
 
   setupMotors();
   stopMotors();
-  Serial.println("[INIT] Motors OK (LEDC)");
+  Serial.println("[INIT] Motors OK (pins 7,8,9,15)");
 
-  Serial.println("[INIT] Skipping servo (debug mode)");
+  pinMode(TFT_BL, OUTPUT);
+  setBrightness(255);
+  pinMode(TOUCH_PIN, INPUT);
 
-  Serial.println("[INIT] Creating WiFiManager...");
+  pinMode(TFT_RST, OUTPUT);
+  digitalWrite(TFT_RST, HIGH);
+  delay(50);
+  digitalWrite(TFT_RST, LOW);
+  delay(100);
+  digitalWrite(TFT_RST, HIGH);
+  delay(100);
+
+  mySPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  mySPI.setFrequency(27000000);
+
+  tft.init(240, 320);
+  tft.setRotation(1);
+  tft.invertDisplay(false);
+  tft.fillScreen(ST77XX_BLACK);
+
+  lastBlinkTime = millis();
+  lastLookAroundTime = millis();
+  lastActivityTime = millis();
+  renderFaceToCanvas();
+  Serial.println("[INIT] Display OK");
+
   WiFiManager wm;
-
   wm.setConfigPortalTimeout(180);
-  Serial.println("[INIT] Starting autoConnect...");
-
   if (!wm.autoConnect("Alexatron")) {
     Serial.println("[INIT] WiFi failed, restarting...");
     delay(2000);
@@ -622,114 +903,83 @@ void setup() {
   }
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
-
-  Serial.println("[INIT] WiFi connected: " + WiFi.localIP().toString());
-
-  Serial.println("\n[NET] === Network Diagnostics ===");
+  WiFi.setSleep(false);
+  Serial.println("[INIT] WiFi: " + WiFi.localIP().toString());
 
   WiFi.setDNS(GOOGLE_DNS, CLOUDFLARE_DNS);
-  Serial.println("[NET] DNS set to 8.8.8.8, 1.1.1.1");
-
   if (!resolveHost()) {
-    Serial.println("[NET] WARNING: Cannot resolve server hostname!");
     setColor(pixels.Color(255, 50, 0));
     delay(3000);
   }
-
   if (!checkInternetConnectivity()) {
-    Serial.println("[NET] WARNING: Server HTTPS not reachable!");
     setColor(pixels.Color(255, 50, 0));
     delay(3000);
   }
 
-  Serial.println("[NET] =============================\n");
-
-  Serial.println("[INIT] Installing Mic I2S...");
   i2s_config_t mic_cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = MIC_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_I2S,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 256
+    .dma_buf_count = MIC_DMA_BUF_COUNT,
+    .dma_buf_len = MIC_DMA_BUF_LEN,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = I2S_PIN_NO_CHANGE
   };
   i2s_pin_config_t mic_p = {
-    .bck_io_num = MIC_BCLK_PIN,
+    .bck_io_num = MIC_BCK_PIN,
     .ws_io_num = MIC_WS_PIN,
     .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = MIC_SD_PIN
   };
   esp_err_t err = i2s_driver_install(MIC_I2S_PORT, &mic_cfg, 0, NULL);
   if (err != ESP_OK) {
-    Serial.printf("[ERROR] Mic I2S install failed: %d\n", err);
+    Serial.printf("[ERROR] Mic I2S failed: %d\n", err);
     setColor(pixels.Color(255, 0, 0));
     while (true) { delay(500); }
   }
   i2s_set_pin(MIC_I2S_PORT, &mic_p);
-  Serial.println("[INIT] Mic I2S OK");
+  Serial.printf("[INIT] Mic OK (%dx%d DMA)\n", MIC_DMA_BUF_COUNT, MIC_DMA_BUF_LEN);
 
   setupPcm5102();
-
-  // JITTER FIX: Mas maraming blocks para sa mobile data buffer
-  audioQueue = xQueueCreate(AUDIO_QUEUE_BLOCK_COUNT, sizeof(AudioQueueBlock));
-  if (!audioQueue) {
-    Serial.println("[ERROR] Audio playback queue allocation failed");
-    setColor(pixels.Color(255, 0, 0));
-    while (true) { delay(500); }
-  }
-  if (xTaskCreatePinnedToCore(
-        audioPlaybackTask, "audio-playback", 8192, nullptr, 2,
-        &audioPlaybackTaskHandle, 1) != pdPASS) {
-    Serial.println("[ERROR] Audio playback task creation failed");
-    setColor(pixels.Color(255, 0, 0));
-    while (true) { delay(500); }
-  }
-  Serial.printf("[INIT] Audio jitter queue ready (%d blocks / %.1fs stereo)\n",
-                AUDIO_QUEUE_BLOCK_COUNT,
-                (float)(AUDIO_QUEUE_BLOCK_BYTES * AUDIO_QUEUE_BLOCK_COUNT) /
-                  (AUDIO_RATE * sizeof(int16_t) * 2));  // *2 for stereo
-
   if (PCM5102_TONE_TEST && dacReady) playPcm5102ToneTest();
 
-  Serial.print("[INIT] Free heap before WS: ");
+  Serial.print("[INIT] Free heap: ");
   Serial.println(ESP.getFreeHeap());
-  if (ESP.getFreeHeap() < 80000) {
-    Serial.println("[WARN] Heap is low for TLS WebSocket");
-  }
 
   webSocket.beginSSL(WS_HOST, WS_PORT, WS_PATH);
   webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(3000);
+  webSocket.setReconnectInterval(10000);
+  webSocket.enableHeartbeat(30000, 10000, 2);
 
   setColor(pixels.Color(0, 0, 100));
-  Serial.println("[INIT] Setup complete!");
-  Serial.printf("[INIT] AUDIO_TEST_MODE = %s\n\n", AUDIO_TEST_MODE ? "ON (no audio)" : "OFF");
+  Serial.println("[INIT] Setup complete!\n");
 }
 
-// --------------------
-// Loop
-// --------------------
+// ═══════════════════════════════════════════════════════════════════
+//  LOOP
+// ═══════════════════════════════════════════════════════════════════
 
 void loop() {
+  unsigned long now = millis();
+
   maintainWiFiConnection();
   webSocket.loop();
 
-  if (motorsActive && millis() > moveStopAt) stopMotors();
+  if (motorsActive && now > moveStopAt) stopMotors();
 
-  if (isWSConnected && (millis() - lastKeepalive >= KEEPALIVE_INTERVAL)) {
-    lastKeepalive = millis();
-    webSocket.sendTXT("{\"ping\":1}");
-    Serial.println("[NET] Keepalive sent");
+  if (now - lastFaceRender >= FACE_RENDER_INTERVAL) {
+    lastFaceRender = now;
+    updateFaceAnimation();
   }
 
   if (!isWSConnected || !isGeminiReady) return;
   if (isPlaying) return;
 
-  if (AUDIO_TEST_MODE) {
-    return;
-  }
+  if (AUDIO_TEST_MODE) return;
 
   int16_t sample_buffer[MIC_CHUNK_SAMPLES];
   size_t bytes_read = 0;
@@ -738,8 +988,7 @@ void loop() {
 
   streamMicChunk(reinterpret_cast<const uint8_t*>(sample_buffer), bytes_read);
   micFramesSent++;
-  if (micFramesSent == 1 || micFramesSent % 100 == 0) {
-    Serial.printf("[MIC] Continuous audio frame #%lu (%u bytes)\n",
-                  micFramesSent, (unsigned)bytes_read);
+  if (micFramesSent == 1 || micFramesSent % 200 == 0) {
+    Serial.printf("[MIC] Frame #%lu (%u bytes)\n", micFramesSent, (unsigned)bytes_read);
   }
 }

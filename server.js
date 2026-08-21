@@ -336,7 +336,7 @@ const ESP32_AUDIO_BYTES_PER_MS = 48;
 
 // Keep a full second of PCM ready before playback starts. This absorbs
 // short mobile-data stalls without making the ESP32 wait several seconds.
-const ESP32_PREFILL_MS = 1000;
+const ESP32_PREFILL_MS = 280;
 const ESP32_PREFILL_BYTES = ESP32_AUDIO_BYTES_PER_MS * ESP32_PREFILL_MS;
 
 // Allow longer bursts from Gemini while bounding latency. Oldest audio is
@@ -388,6 +388,18 @@ const ROBOT_TOOLS = [{
           query: { type: 'STRING', description: 'A concise web search query.' }
         },
         required: ['query']
+      }
+    },
+    {
+      name: 'set_volume',
+      description: 'Set LOOI speaker volume or mute it. Use percent from 1 to 100.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          percent: { type: 'INTEGER', minimum: 0, maximum: 100 },
+          muted: { type: 'BOOLEAN' }
+        },
+        required: []
       }
     }
   ]
@@ -728,6 +740,20 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
           const args = fc.args || {};
           const output = await searchWeb(args.query);
           immediateResponses.push({ id: fc.id, name: fc.name, response: { output } });
+        }
+        if (fc.name === 'set_volume') {
+          const args = fc.args || {};
+          const percent = args.percent === undefined ? null : Math.max(0, Math.min(100, Number(args.percent)));
+          const muted = args.muted === undefined ? null : Boolean(args.muted);
+          const payload = { robotAction: true, volume: percent, mute: muted };
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify(payload));
+          }
+          immediateResponses.push({
+            id: fc.id,
+            name: fc.name,
+            response: { output: `Volume command applied: ${percent === null ? '' : `${percent}% `}${muted === true ? 'muted' : muted === false ? 'unmuted' : ''}`.trim() }
+          });
         }
       }
       if (immediateResponses.length && socket.readyState === WebSocket.OPEN) {

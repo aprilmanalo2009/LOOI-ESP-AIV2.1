@@ -334,14 +334,15 @@ const ESP32_AUDIO_FRAME_BYTES = 2048;
 // 24kHz mono = 48000 bytes/second = 48 bytes/ms
 const ESP32_AUDIO_BYTES_PER_MS = 48;
 
-// BEFORE: 220ms prefill (kulang para sa mobile)
-// AFTER: 500ms prefill (mas maraming buffer para absorb yung jitter)
-const ESP32_PREFILL_MS = 500;
+// Keep a full second of PCM ready before playback starts. This absorbs
+// short mobile-data stalls without making the ESP32 wait several seconds.
+const ESP32_PREFILL_MS = 1000;
 const ESP32_PREFILL_BYTES = ESP32_AUDIO_BYTES_PER_MS * ESP32_PREFILL_MS;
 
-// BEFORE: 3.5s max queue
-// AFTER: 7s max queue (para hindi ma-drop yung audio sa network hiccups)
-const ESP32_MAX_QUEUE_MS = 7000;
+// Allow longer bursts from Gemini while bounding latency. Oldest audio is
+// discarded only after this limit, so a temporary cellular burst does not
+// immediately cut the current response.
+const ESP32_MAX_QUEUE_MS = 12000;
 const ESP32_MAX_QUEUE_BYTES = ESP32_AUDIO_BYTES_PER_MS * ESP32_MAX_QUEUE_MS;
 
 // Mas lenient socket buffer (128KB instead of 64KB)
@@ -377,6 +378,17 @@ const ROBOT_TOOLS = [{
         },
         required: ['action']
       }
+    },
+    {
+      name: 'search_web',
+      description: 'Search the live web for current information. Use this for latest news, weather, prices, schedules, current events, or anything that may have changed.',
+      parameters: {
+        type: 'OBJECT',
+        properties: {
+          query: { type: 'STRING', description: 'A concise web search query.' }
+        },
+        required: ['query']
+      }
     }
   ]
 }];
@@ -402,8 +414,78 @@ Signature comebacks (use naturally, don't force them):
 - When you make a mistake: "Oops, lag ko lang. Chos!"
 
 Always call run_scenario immediately for any motor gesture or emotion response.
+Use search_web whenever the user asks for current or time-sensitive information. Do not
+claim a live fact unless it is supported by the returned web sources. Keep the spoken
+answer short and mention the source name or site when useful.
 
 You are NOT a subservient robot. You are a companion with personality, boundaries, and a sharp tongue when needed. You respect your creator April Manalo above all else.`;
+
+function cleanWebText(value) {
+  return String(value || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&#x27;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function searchWeb(query) {
+  const normalized = String(query || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  if (!normalized) return 'No search query was provided.';
+
+  try {
+    const response = await fetch(
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(normalized)}`,
+      {
+        headers: {
+          'User-Agent': 'LOOI-Robot/1.0',
+          Accept: 'text/html',
+        },
+        signal: AbortSignal.timeout(12000),
+      },
+    );
+    if (!response.ok) throw new Error(`search HTTP ${response.status}`);
+    const html = await response.text();
+    const results = [];
+    const pattern = /<a[^>]*class="[^"]*\bresult__a\b[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = pattern.exec(html)) && results.length < 5) {
+      const title = cleanWebText(match[2]);
+      let url = match[1].replace(/&amp;/g, '&');
+      try {
+        const parsed = new URL(url, 'https://duckduckgo.com');
+        url = parsed.searchParams.get('uddg') || url;
+      } catch {}
+      if (title && /^https?:\/\//i.test(url)) {
+        results.push({ title, url });
+      }
+    }
+
+    const snippetPattern = /<a[^>]*class="[^"]*\bresult__snippet\b[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    let snippet;
+    let index = 0;
+    while ((snippet = snippetPattern.exec(html)) && index < results.length) {
+      results[index].snippet = cleanWebText(snippet[1]).slice(0, 500);
+      index++;
+    }
+
+    if (!results.length) return `No verified web results were found for "${normalized}".`;
+    return [
+      `Live web results for: ${normalized}`,
+      ...results.map((result, i) =>
+        `${i + 1}. ${result.title}\nSource: ${result.url}` +
+        (result.snippet ? `\n${result.snippet}` : '')
+      ),
+    ].join('\n');
+  } catch (error) {
+    console.error(`[WebSearch] ${normalized}:`, error.message);
+    return `Live web search failed for "${normalized}". Do not guess; tell the user it could not be verified.`;
+  }
+}
+
 function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   let apiKey = getActiveKey();
   const cid = Date.now().toString(36);
@@ -470,12 +552,14 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   let esp32PumpTimer = null;
   let esp32PumpStarted = false;
   let esp32LastPumpTime = 0;
+  let esp32TurnCompletePending = false;
 
   const clearEsp32AudioQueue = () => {
     esp32OutQueue.length = 0;
     esp32OutQueueBytes = 0;
     esp32PumpStarted = false;
     esp32LastPumpTime = 0;
+    esp32TurnCompletePending = false;
     if (esp32PumpTimer) {
       clearTimeout(esp32PumpTimer);
       esp32PumpTimer = null;
@@ -485,13 +569,24 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
   // FIXED: Better pump with drift correction
   const pumpEsp32Audio = () => {
     if (esp32PumpTimer) return; // pump already running
-    if (!esp32PumpStarted && esp32OutQueueBytes < ESP32_PREFILL_BYTES) return;
+    if (!esp32PumpStarted &&
+        esp32OutQueueBytes < ESP32_PREFILL_BYTES &&
+        !esp32TurnCompletePending) return;
     esp32PumpStarted = true;
 
     const step = () => {
-      if (clientWs.readyState !== WebSocket.OPEN || esp32OutQueue.length === 0) {
+      if (clientWs.readyState !== WebSocket.OPEN) {
         esp32PumpTimer = null;
-        if (esp32OutQueue.length === 0) esp32PumpStarted = false;
+        esp32PumpStarted = false;
+        return;
+      }
+      if (esp32OutQueue.length === 0) {
+        esp32PumpTimer = null;
+        esp32PumpStarted = false;
+        if (esp32TurnCompletePending) {
+          esp32TurnCompletePending = false;
+          clientWs.send(JSON.stringify({ turnComplete: true }));
+        }
         return;
       }
 
@@ -502,21 +597,14 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
         return;
       }
 
-      // FIXED: Send multiple frames at once if available (burst tolerance)
-      const framesToSend = Math.min(3, esp32OutQueue.length);
-      let totalBytes = 0;
+      // Send one frame per audio-clock interval. Sending three frames in a
+      // burst makes a mobile route/DMA buffer bursty even when the average
+      // throughput is correct.
+      const frame = esp32OutQueue.shift();
+      esp32OutQueueBytes -= frame.length;
+      clientWs.send(frame, { binary: true, compress: false });
 
-      for (let i = 0; i < framesToSend; i++) {
-        const frame = esp32OutQueue.shift();
-        if (!frame) break;
-        esp32OutQueueBytes -= frame.length;
-        totalBytes += frame.length;
-        clientWs.send(frame, { binary: true, compress: false });
-      }
-
-      // FIXED: Calculate delay based on actual bytes sent, not per frame
-      // This is more accurate for variable-sized chunks
-      const delayMs = Math.max(1, Math.round(totalBytes / ESP32_AUDIO_BYTES_PER_MS));
+      const delayMs = Math.max(1, Math.round(frame.length / ESP32_AUDIO_BYTES_PER_MS));
       esp32LastPumpTime = Date.now();
       esp32PumpTimer = setTimeout(step, delayMs);
     };
@@ -605,7 +693,7 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
     }));
     });
 
-    socket.on('message', (data) => {
+    socket.on('message', async (data) => {
     const str = data.toString();
     let msg;
     try { msg = JSON.parse(str); } catch { return; }
@@ -635,6 +723,11 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
             clientWs.send(JSON.stringify(robotPayload));
           }
           immediateResponses.push({ id: fc.id, name: fc.name, response: { output: 'executed' } });
+        }
+        if (fc.name === 'search_web') {
+          const args = fc.args || {};
+          const output = await searchWeb(args.query);
+          immediateResponses.push({ id: fc.id, name: fc.name, response: { output } });
         }
       }
       if (immediateResponses.length && socket.readyState === WebSocket.OPEN) {
@@ -670,7 +763,13 @@ function attachGeminiLive(clientWs, request, { target = 'web' } = {}) {
 
     if (msg.serverContent?.turnComplete === true) {
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(target === 'esp32' ? JSON.stringify({ turnComplete: true }) : str);
+        if (target === 'esp32') {
+          // Keep the marker behind all paced PCM frames.
+          esp32TurnCompletePending = true;
+          pumpEsp32Audio();
+        } else {
+          clientWs.send(str);
+        }
       }
       console.log(`[GeminiLive:${cid}] Gemini turn complete (${outputAudioFrames} audio frame(s))`);
       outputAudioFrames = 0;
